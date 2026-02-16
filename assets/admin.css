@@ -1,0 +1,286 @@
+.ett-wrap .ett-card{
+	background:#fff;
+	border:1px solid #ccd0d4;
+	border-radius:8px;
+	padding:16px;
+	margin:16px 0;
+}
+
+.ett-grid{
+	display:grid;
+	grid-template-columns:1fr 1fr;
+	gap:16px;
+}
+
+@media (max-width:1100px){
+	.ett-grid{ grid-template-columns:1fr; }
+}
+
+.ett-row{ margin:10px 0; }
+.ett-row label{ display:block; font-weight:600; margin-bottom:4px; }
+.ett-row input{ width:100%; max-width:520px; }
+
+.ett-status{ margin-top:12px; }
+.ett-ok{ color:#1d7f2b; font-weight:600; }
+.ett-bad{ color:#b32d2e; font-weight:600; }
+
+.ett-tree{
+	border:1px solid #e2e4e7;
+	background:#fafafa;
+	padding:10px;
+	max-height:520px;
+	overflow:auto;
+	border-radius:8px;
+}
+
+.ett-ul{ list-style:none; margin:0; padding-left:14px; }
+.ett-li{ margin:2px 0; }
+.ett-node{ display:flex; align-items:center; gap:8px; padding:2px 0; }
+.ett-label{ cursor:pointer; user-select:none; }
+.ett-id{ color:#646970; font-size:12px; margin-left:6px; }
+
+.ett-toggle{
+	border:1px solid #ccd0d4;
+	background:#fff;
+	border-radius:6px;
+	width:28px;
+	height:24px;
+	line-height:20px;
+	cursor:pointer;
+}
+
+.ett-toggle-spacer{
+	width:28px;
+	display:inline-block;
+}
+
+.ett-sched-input{
+	width:100px !important;
+	max-width:100px;
+	box-sizing:border-box;
+}
+
+.ett-children{ margin-left:18px; }
+
+.ett-hubs label{ display:block; margin:6px 0; }
+
+/* Trade hubs: grid alignment for header + rows */
+.ett-hub-row{
+	display:grid;
+	grid-template-columns:minmax(260px, 1fr) minmax(320px, 1fr) minmax(320px, 1fr);
+	column-gap:16px;
+	align-items:center;
+	padding:6px 0;
+	border-bottom:1px solid #f0f0f1;
+}
+
+.ett-hub-row:last-child{ border-bottom:none; }
+
+.ett-hub-head{
+	padding-top:0;
+	border-bottom:1px solid #dcdcde;
+}
+
+.ett-hub-check{
+	margin:0;
+	display:flex;
+	align-items:center;
+	gap:8px;
+}
+
+.ett-hub-secondary,
+.ett-hub-tertiary{
+	width:100%;
+	max-width:100%;
+	box-sizing:border-box;
+}
+
+.ett-hub-head > .ett-hub-check,
+.ett-hub-head > .ett-hub-secondary,
+.ett-hub-head > .ett-hub-tertiary{
+	display:block;
+	text-align:center;
+}
+
+.ett-hub-check input[type="checkbox"]{ margin:0; }
+
+.ett-actions{
+	display:flex;
+	gap:10px;
+	align-items:center;
+	margin-bottom:12px;
+}
+
+.ett-progress{
+	border:1px solid #e2e4e7;
+	background:#fcfcfd;
+	border-radius:10px;
+	padding:12px;
+}
+
+.ett-progress-head{
+	display:flex;
+	justify-content:space-between;
+	align-items:flex-start;
+	gap:12px;
+}
+
+.ett-title{ font-weight:700; }
+.ett-sub{ color:#50575e; margin-top:3px; }
+
+.ett-heartbeat{
+	display:flex;
+	align-items:center;
+	gap:8px;
+	font-weight:600;
+}
+
+.ett-dot{
+	width:10px;
+	height:10px;
+	border-radius:50%;
+	background:#a7aaad;
+}
+
+.ett-dot.ok{ background:#00a32a; }
+.ett-dot.bad{ background:#d63638; }
+.ett-dot.warn{ background:#dba617; }
+
+.ett-kpis{
+	display:grid;
+	grid-template-columns:repeat(6, 1fr);
+	gap:10px;
+	margin-top:12px;
+}
+
+@media (max-width:1100px){
+	.ett-kpis{ grid-template-columns:repeat(2, 1fr); }
+}
+
+.ett-kpi{
+	border:1px solid #e2e4e7;
+	background:#fff;
+	border-radius:10px;
+	padding:10px;
+}
+
+.ett-k{ color:#646970; font-size:12px; }
+.ett-v{ font-weight:700; margin-top:4px; }
+
+.ett-json{
+	margin-top:12px;
+	max-height:260px;
+	overflow:auto;
+	background:#0b1020;
+	color:#e6edf3;
+	padding:10px;
+	border-radius:10px;
+	font-size:12px;
+}
+
+.ett-warning{
+	margin-top:10px;
+	padding:10px;
+	border-radius:10px;
+	background:#fff2cc;
+	border:1px solid #f0c36d;
+}
+
+#ett-save-selection:disabled,
+#ett-save-selection[disabled]{
+	opacity:0.55;
+	cursor:not-allowed;
+}
+
+#ett-selection-form p.submit{ margin-top:12px; }
+
+.ett-mg-actions{
+	margin-top:8px;
+	margin-bottom:0;
+}
+
+#ett-mg-filter{
+	width:624px;
+	max-width:100%;
+	box-sizing:border-box;
+	margin-bottom:10px;
+}
+
+.ett-last-run{
+	margin-top:10px;
+	margin-bottom:10px;
+	color:#50575e;
+}
+
+.ett-confirm{
+	margin-top:12px;
+	padding:10px;
+	border:1px solid #f0c36d;
+	background:#fff2cc;
+	border-radius:10px;
+}
+
+#ett-mg-tree{ margin-bottom:14px; }
+
+.ett-confirm-box{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.ett-confirm-text{ font-weight:600; }
+.ett-confirm-actions{ display:flex; gap:8px; }
+
+.ett-typeid-count{
+	margin-top:10px;
+	color:#50575e;
+}
+
+#ett-run-confirm{ margin-bottom:12px; }
+
+#ett-job-phase{ font-weight:600; }
+
+.ett-status-stack{
+	display:flex;
+	flex-direction:column;
+	align-items:flex-end;
+	gap:6px;
+}
+
+.ett-sso-status{
+	margin-top:12px;
+	padding:8px 10px;
+	border-radius:4px;
+	font-weight:500;
+}
+
+.ett-sso-status.ett-ok{
+	background:#e6f4ea;
+	border:1px solid #b7e1c1;
+	color:#1e4620;
+}
+
+.ett-sso-status.ett-bad{
+	background:#fff4e5;
+	border:1px solid #ffd699;
+	color:#663c00;
+}
+
+.ett-warning-box{
+	margin:10px 0 14px;
+	padding:12px;
+	border-radius:8px;
+	background:#fdecea;
+	border:1px solid #f5c2c7;
+	color:#842029;
+	font-weight:500;
+}
+
+#ett-job-phase.ett-phase-ok{ color:#1d7f2b; }
+#ett-job-phase.ett-phase-bad{ color:#b32d2e; }
+#ett-job-phase.ett-phase-warn{ color:#dba617; }
+
+.ett-sched-warning{
+	margin-top:8px;
+	padding:10px;
+	border-radius:8px;
+	background:#fff8e1;
+	border:1px solid #f0c36d;
+	color:#663c00;
+	font-weight:500;
+}
