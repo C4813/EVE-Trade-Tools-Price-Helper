@@ -28,6 +28,117 @@ My intention is to redesign my existing plugins to both strengthen their code ba
 
 ---
 
+## Features
+
+- Manual price pulls (admin-triggered)
+- Scheduled automatic pulls
+- Hub market price support
+- Player structure price support (via SSO)
+- Fuzzwork data import
+- Tick-based execution for rate safety
+- Cron-safe execution model
+- Clean uninstall (removes only WP-side data)
+- PHPCS clean (WordPress standards compliant)
+
+---
+
+## Installation
+
+1. Upload the plugin to `/wp-content/plugins/`
+2. Activate via the WordPress admin
+3. Navigate to: ```Settings → ETT Price Helper```
+
+## Initial Setup
+
+### 1. Configure External Database
+
+Provide:
+- Host (On shared hosting, this is usually ```localhost```)
+- Database name
+- Username
+- Password
+
+Test and save connection.
+
+### 2. Run Fuzzwork Import
+
+Before generating typeIDs, you must import static data.
+
+In the admin panel:
+
+- Run Fuzzwork import
+- Wait for all datasets to complete
+
+This generates:
+- Market groups
+- TypeIDs
+- Meta mappings
+
+**Important:** If this is not run, market group selection will not function. It is only necessary to run this once after first plugin activation, and again after the fuzzwork index dump latest is updated.
+
+### 3. Select Market Groups
+
+After Fuzzwork import:
+
+- Select desired market groups
+- Save configuration
+
+These determine which typeIDs are generated.
+
+### 4. Generate TypeIDs
+
+Click: ```Generate TypeIDs```
+
+This builds the internal list of typeIDs used for price pulls.
+
+### 5. Configure Trade Hubs
+
+Select one or more NPC trade hubs (e.g., Jita, Amarr, etc.).
+
+These will be used for public market price pulls.
+
+### 6. (Optional) Connect EVE SSO
+
+If you want structure pricing:
+
+1. Enter:
+   - EVE SSO Client ID
+   - EVE SSO Client Secret
+2. Click **Connect**
+3. Authorize via EVE Online
+4. Save returned character + token
+
+This allows authenticated structure price pulls.
+
+## Running Price Pulls
+
+### Manual Run
+
+Click: ```Run Price Pull```
+
+The job system will:
+
+- Create a job record
+- Process in ticks
+- Respect rate limits
+- Display progress live
+
+Execution continues via cron ticks until complete.
+
+### Scheduled Runs
+
+You can configure scheduled execution:
+
+- Example: Every 12 hours at 07:00 / 19:00
+- Uses WordPress cron hooks:
+  - `ett_ph_prices_scheduled_start`
+  - `ett_ph_prices_tick`
+
+**Important:** By default, WP-Cron relies on site traffic.  
+For production reliability, use a **real system cron** calling: ```wp-cron.php``` or trigger WP CLI.
+
+---
+
 ## Architecture Summary
 
 The plugin consists of several functional components:
@@ -62,133 +173,6 @@ Used to generate selectable market groups and derive valid typeIDs.
 All market prices are written to an external database defined in plugin settings.
 
 **Important:** The plugin does NOT modify or delete external database data during uninstall. It is strongly recommended to use an empty and stand-alone database to store the price data.
-
----
-
-## Features
-
-- Manual price pulls (admin-triggered)
-- Scheduled automatic pulls
-- Hub market price support
-- Player structure price support (via SSO)
-- Fuzzwork data import
-- Tick-based execution for rate safety
-- Cron-safe execution model
-- Clean uninstall (removes only WP-side data)
-- PHPCS clean (WordPress standards compliant)
-
----
-
-## Installation
-
-1. Upload the plugin to `/wp-content/plugins/`
-2. Activate via the WordPress admin
-3. Navigate to: ```Settings → ETT Price Helper```
-
----
-
-## Initial Setup
-
-### 1. Configure External Database
-
-Provide:
-- Host (On shared hosting, this is usually ```localhost```)
-- Database name
-- Username
-- Password
-
-Test and save connection.
-
----
-
-### 2. Run Fuzzwork Import
-
-Before generating typeIDs, you must import static data.
-
-In the admin panel:
-
-- Run Fuzzwork import
-- Wait for all datasets to complete
-
-This generates:
-- Market groups
-- TypeIDs
-- Meta mappings
-
-**Important:** If this is not run, market group selection will not function. It is only necessary to run this once after first plugin activation, and again after the fuzzwork index dump latest is updated.
-
----
-
-### 3. Select Market Groups
-
-After Fuzzwork import:
-
-- Select desired market groups
-- Save configuration
-
-These determine which typeIDs are generated.
-
----
-
-### 4. Generate TypeIDs
-
-Click: ```Generate TypeIDs```
-
-This builds the internal list of typeIDs used for price pulls.
-
----
-
-### 5. Configure Trade Hubs
-
-Select one or more NPC trade hubs (e.g., Jita, Amarr, etc.).
-
-These will be used for public market price pulls.
-
----
-
-### 6. (Optional) Connect EVE SSO
-
-If you want structure pricing:
-
-1. Enter:
-   - EVE SSO Client ID
-   - EVE SSO Client Secret
-2. Click **Connect**
-3. Authorize via EVE Online
-4. Save returned character + token
-
-This allows authenticated structure price pulls.
-
----
-
-## Running Price Pulls
-
-### Manual Run
-
-Click: ```Run Price Pull```
-
-The job system will:
-
-- Create a job record
-- Process in ticks
-- Respect rate limits
-- Display progress live
-
-Execution continues via cron ticks until complete.
-
----
-
-### Scheduled Runs
-
-You can configure scheduled execution:
-
-- Example: Every 12 hours at 07:00 / 19:00
-- Uses WordPress cron hooks:
-  - `ett_ph_prices_scheduled_start`
-  - `ett_ph_prices_tick`
-
-**Important:** By default, WP-Cron relies on site traffic.  
-For production reliability, use a **real system cron** calling: ```wp-cron.php``` or trigger WP CLI.
 
 ---
 
