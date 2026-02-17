@@ -372,7 +372,7 @@
 			}
 
 			let html = '';
-			html += '<table class="widefat striped" style="margin-top:8px;">';
+			html += '<table class="widefat striped ett-history-table">';
 			html += '<thead><tr>';
 			html += '<th>Started</th><th>Finished</th><th>Status</th><th>Driver</th><th>Last message</th><th>Error</th>';
 			html += '</tr></thead><tbody>';
