@@ -648,7 +648,7 @@ class ETT_Admin {
                     <?php endif; ?>
 
 					<p>Imports the following tables from Fuzzwork (<code>/dump/latest/</code>) into the external DB:</p>
-					<ul style="margin:6px 0 10px 18px; list-style:disc;">
+					<ul class="ett-list-disc">
 						<li><code>invMarketGroups</code></li>
 						<li><code>invTypes</code> (nodescription CSV)</li>
 						<li><code>invMetaGroups</code></li>
@@ -679,7 +679,7 @@ class ETT_Admin {
                     
                     <p><strong>Last import:</strong> <span id="ett-last-import"><?php echo esc_html($last_import_txt); ?></span></p>
                     
-                    <div class="ett-muted" id="ett-last-import-details-wrap" style="margin-top:6px;<?php echo $details_txt ? '' : ' display:none;'; ?>">
+                    <div class="ett-muted ett-mt-6<?php echo $details_txt ? '' : ' ett-hidden'; ?>" id="ett-last-import-details-wrap">
                     	<p><strong>Last import details:</strong> <span id="ett-last-import-details"><?php echo esc_html($details_txt); ?></span></p>
                     </div>
 
@@ -695,9 +695,9 @@ class ETT_Admin {
 				<div class="ett-card">
 					<h2>EVE SSO</h2>
 
-					<div class="ett-muted" style="margin:8px 0 12px;">
+					<div class="ett-muted ett-muted-block">
 						<p><strong>Create an EVE Developers application</strong></p>
-						<ol style="margin:6px 0 0 18px; list-style:decimal;">
+						<ol class="ett-list-decimal">
 							<li>Go to <a href="https://developers.eveonline.com">https://developers.eveonline.com</a> and log in.</li>
 							<li>Create a new application.</li>
 							<li>Set the application <strong>Callback URL</strong> to the value shown below (exact match required).</li>
@@ -708,13 +708,13 @@ class ETT_Admin {
 							<li>Set the application <strong>Scopes</strong> to the following (required by this plugin):</li>
 						</ol>
 
-						<ul style="margin:6px 0 0 18px; list-style:disc;">
+						<ul class="ett-list-disc ett-tight">
 							<li><code>esi-universe.read_structures.v1</code></li>
 							<li><code>esi-markets.structure_markets.v1</code></li>
 							<li><code>esi-search.search_structures.v1</code></li>
 						</ul>
 
-						<p class="description" style="margin-top:8px;">
+						<p class="description ett-mt-8">
 							After creating the app, copy the Client ID and Secret into this page and click “Save SSO Settings”, then “Connect EVE SSO”.
 						</p>
 					</div>
@@ -736,15 +736,15 @@ class ETT_Admin {
 						<?php submit_button('Save SSO Settings', 'secondary', 'submit', false); ?>
 					</form>
 
-					<div style="margin-top:10px;">
+					<div class="ett-mt-10">
 						<?php if ($sso_authed): ?>
 							<div class="ett-status ett-sso-status ett-ok">
 								<strong>Status:</strong>
 								Authenticated<?php echo $char_name ? ' as ' . esc_html($char_name) : ''; ?>.
 							</div>
 
-                        <div class="ett-actions" style="margin-top:10px;">
-                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;">
+                        <div class="ett-actions ett-mt-10">
+                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="ett-inline-form">
                                 <?php wp_nonce_field('ett_sso_disconnect'); ?>
                                 <input type="hidden" name="action" value="ett_sso_disconnect"/>
                                 <button type="submit" class="button">Disconnect</button>
@@ -757,7 +757,7 @@ class ETT_Admin {
 								Not authenticated. Secondary Market dropdowns are disabled.
 							</div>
 
-							<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top:10px;">
+							<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="ett-mt-10">
 								<?php wp_nonce_field('ett_sso_start'); ?>
 								<input type="hidden" name="action" value="ett_sso_start"/>
                                 <button id="ett-btn-sso-connect" type="submit" class="button button-primary" <?php disabled(empty($client_id) || empty($client_secret)); ?>>
@@ -788,7 +788,7 @@ class ETT_Admin {
 						<div class="ett-grid">
 							<div>
 								<label><strong>Filter</strong></label>
-								<p style="margin:6px 0 0;">
+								<p class="ett-mt-6 ett-mb-0">
 									<input type="text" id="ett-mg-filter" placeholder="Type to filter market groups..."/>
 								</p>
 							</div>
@@ -815,7 +815,7 @@ class ETT_Admin {
 						<button class="button button-secondary" id="ett-btn-generate" type="button" <?php disabled(!$schema_ok); ?>>Generate TypeIDs</button>
 					</div>
 
-					<p class="description" style="margin-top:8px;">
+					<p class="description ett-mt-8">
 						<strong>Generate TypeIDs</strong> saves a static list of typeIDs for the currently selected market groups.
 					</p>
 
@@ -929,7 +929,7 @@ class ETT_Admin {
                     <?php
                     $refresh_disabled = !$sso_authed;
                     ?>
-                    <div class="ett-actions" style="margin-top:10px;">
+                    <div class="ett-actions ett-mt-10">
                         <button type="button" class="button button-secondary" id="ett-btn-refresh-structures" <?php disabled($refresh_disabled); ?>>Refresh structures</button>
                     </div>
                     
@@ -966,10 +966,10 @@ class ETT_Admin {
                     <?php wp_nonce_field('ett_perf', 'ett_perf_nonce'); ?>
                     <input type="hidden" name="action" value="ett_save_perf"/>
 
-					<details style="margin:12px 0;">
-						<summary style="cursor:pointer; user-select:none;">Advanced performance</summary>
+                    <details class="ett-details">
+                        <summary class="ett-summary">Advanced performance</summary>
 
-						<div class="ett-row" style="margin-top:10px;">
+						<div class="ett-row ett-mt-10">
 							<label>Max pages per tick/call</label>
 							<input
 								type="number"
@@ -995,7 +995,7 @@ class ETT_Admin {
 							<p class="description">Time budget per tick/call. Keep conservative on shared hosting (8–12s).</p>
 						</div>
 
-						<p style="margin-top:10px;">
+						<p class="ett-mt-10">
 							<button type="submit" class="button button-secondary">Save performance settings</button>
 						</p>
 					</details>
@@ -1021,7 +1021,7 @@ class ETT_Admin {
 					</span>
 				</div>
 
-				<div class="ett-confirm" id="ett-run-confirm" style="display:none;">
+				<div class="ett-confirm ett-hidden" id="ett-run-confirm">
 					<div class="ett-confirm-box">
 						<div class="ett-confirm-text" id="ett-run-confirm-text"></div>
 						<div class="ett-confirm-actions">
@@ -1037,7 +1037,7 @@ class ETT_Admin {
 							<div class="ett-title">Job Progress</div>
 							<div class="ett-sub" id="ett-job-phase">Idle.</div>
 							<div class="ett-sub" id="ett-job-msg">Idle.</div>
-							<div class="ett-sub" id="ett-job-warn" style="display:none;"></div>
+							<div class="ett-sub ett-hidden" id="ett-job-warn"></div>
 						</div>
 
 						<div class="ett-status-stack">
@@ -1064,7 +1064,7 @@ class ETT_Admin {
 
 					<pre class="ett-json" id="ett-progress-json">{}</pre>
 
-					<div class="ett-warning" id="ett-stalled" style="display:none;">
+					<div class="ett-warning ett-hidden" id="ett-stalled">
 						Heartbeat has not updated recently — job may be stalled (PHP timeout, network issue, or rate limiting).
 					</div>
 				</div>
@@ -1103,7 +1103,7 @@ class ETT_Admin {
 					<div class="notice notice-warning"><p><strong>Cancelled:</strong> Automatic schedule disabled. (You can re-enable by saving a schedule again.)</p></div>
 				<?php endif; ?>
 
-				<div id="ett-sched-rate-warning" class="ett-sched-warning" style="display:none;">
+				<div id="ett-sched-rate-warning" class="ett-sched-warning ett-hidden">
 					<strong>Warning:</strong> Running every 1–2 hours may trigger ESI rate limiting. It is recommended to use 4 hours or more unless you understand the load implications.
 				</div>
 
@@ -1131,16 +1131,16 @@ class ETT_Admin {
 						</select>
 					</div>
 
-					<details id="ett-history-details" style="margin:12px 0;">
-						<summary style="cursor:pointer; user-select:none;">Run history</summary>
+                    <details id="ett-history-details" class="ett-details">
+                        <summary class="ett-summary">Run history</summary>
 
-						<div id="ett-run-history" style="margin-top:10px;">
+						<div id="ett-run-history" class="ett-history-wrap">
 							<?php if (!$job_history && !$job_history_err): ?>
 								<p class="description">No price runs found yet.</p>
 							<?php elseif ($job_history_err): ?>
 								<p class="description">Unable to load history: <?php echo esc_html($job_history_err); ?></p>
 							<?php else: ?>
-								<table class="widefat striped" style="margin-top:8px;">
+								<table class="widefat striped ett-history-table"
 									<thead>
 										<tr>
 											<th>Started</th>
