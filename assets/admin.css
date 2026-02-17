@@ -1,3 +1,8 @@
+/* =========================================================
+   ETT Price Helper – Admin UI
+   ========================================================= */
+
+/* Cards / layout */
 .ett-wrap .ett-card{
 	background:#fff;
 	border:1px solid #ccd0d4;
@@ -16,14 +21,61 @@
 	.ett-grid{ grid-template-columns:1fr; }
 }
 
+/* Form rows */
 .ett-row{ margin:10px 0; }
 .ett-row label{ display:block; font-weight:600; margin-bottom:4px; }
 .ett-row input{ width:100%; max-width:520px; }
 
-.ett-status{ margin-top:12px; }
-.ett-ok{ color:#1d7f2b; font-weight:600; }
-.ett-bad{ color:#b32d2e; font-weight:600; }
+.ett-actions{
+	display:flex;
+	gap:10px;
+	align-items:center;
+	margin-bottom:12px;
+}
 
+#ett-selection-form p.submit{ margin-top:12px; }
+
+/* Status + messages */
+.ett-status{ margin-top:12px; }
+
+.ett-ok,
+.ett-bad{ font-weight:600; }
+
+.ett-ok{ color:#1d7f2b; }
+.ett-bad{ color:#b32d2e; }
+
+.ett-warning,
+.ett-confirm{
+	margin-top:10px;
+	padding:10px;
+	border-radius:10px;
+	background:#fff2cc;
+	border:1px solid #f0c36d;
+}
+
+.ett-confirm{ margin-top:12px; }
+
+.ett-warning-box{
+	margin:10px 0 14px;
+	padding:12px;
+	border-radius:8px;
+	background:#fdecea;
+	border:1px solid #f5c2c7;
+	color:#842029;
+	font-weight:500;
+}
+
+.ett-sched-warning{
+	margin-top:8px;
+	padding:10px;
+	border-radius:8px;
+	background:#fff8e1;
+	border:1px solid #f0c36d;
+	color:#663c00;
+	font-weight:500;
+}
+
+/* Market group tree */
 .ett-tree{
 	border:1px solid #e2e4e7;
 	background:#fafafa;
@@ -35,6 +87,8 @@
 
 .ett-ul{ list-style:none; margin:0; padding-left:14px; }
 .ett-li{ margin:2px 0; }
+.ett-children{ margin-left:18px; }
+
 .ett-node{ display:flex; align-items:center; gap:8px; padding:2px 0; }
 .ett-label{ cursor:pointer; user-select:none; }
 .ett-id{ color:#646970; font-size:12px; margin-left:6px; }
@@ -54,17 +108,23 @@
 	display:inline-block;
 }
 
-.ett-sched-input{
-	width:100px !important;
-	max-width:100px;
-	box-sizing:border-box;
+#ett-mg-tree{ margin-bottom:14px; }
+
+.ett-mg-actions{
+	margin-top:8px;
+	margin-bottom:0;
 }
 
-.ett-children{ margin-left:18px; }
+#ett-mg-filter{
+	width:624px;
+	max-width:100%;
+	box-sizing:border-box;
+	margin-bottom:10px;
+}
 
+/* Trade hubs */
 .ett-hubs label{ display:block; margin:6px 0; }
 
-/* Trade hubs: grid alignment for header + rows */
 .ett-hub-row{
 	display:grid;
 	grid-template-columns:minmax(260px, 1fr) minmax(320px, 1fr) minmax(320px, 1fr);
@@ -104,13 +164,14 @@
 
 .ett-hub-check input[type="checkbox"]{ margin:0; }
 
-.ett-actions{
-	display:flex;
-	gap:10px;
-	align-items:center;
-	margin-bottom:12px;
+/* Scheduler inputs */
+.ett-sched-input{
+	width:100px !important;
+	max-width:100px;
+	box-sizing:border-box;
 }
 
+/* Progress / run UI */
 .ett-progress{
 	border:1px solid #e2e4e7;
 	background:#fcfcfd;
@@ -178,62 +239,21 @@
 	font-size:12px;
 }
 
-.ett-warning{
-	margin-top:10px;
-	padding:10px;
-	border-radius:10px;
-	background:#fff2cc;
-	border:1px solid #f0c36d;
-}
-
-#ett-save-selection:disabled,
-#ett-save-selection[disabled]{
-	opacity:0.55;
-	cursor:not-allowed;
-}
-
-#ett-selection-form p.submit{ margin-top:12px; }
-
-.ett-mg-actions{
-	margin-top:8px;
-	margin-bottom:0;
-}
-
-#ett-mg-filter{
-	width:624px;
-	max-width:100%;
-	box-sizing:border-box;
-	margin-bottom:10px;
-}
-
-.ett-last-run{
-	margin-top:10px;
-	margin-bottom:10px;
-	color:#50575e;
-}
-
-.ett-confirm{
-	margin-top:12px;
-	padding:10px;
-	border:1px solid #f0c36d;
-	background:#fff2cc;
-	border-radius:10px;
-}
-
-#ett-mg-tree{ margin-bottom:14px; }
-
-.ett-confirm-box{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.ett-confirm-text{ font-weight:600; }
-.ett-confirm-actions{ display:flex; gap:8px; }
-
+.ett-last-run,
 .ett-typeid-count{
 	margin-top:10px;
+	margin-bottom:10px;
 	color:#50575e;
 }
+
+.ett-typeid-count{ margin-bottom:0; }
 
 #ett-run-confirm{ margin-bottom:12px; }
 
 #ett-job-phase{ font-weight:600; }
+#ett-job-phase.ett-phase-ok{ color:#1d7f2b; }
+#ett-job-phase.ett-phase-bad{ color:#b32d2e; }
+#ett-job-phase.ett-phase-warn{ color:#dba617; }
 
 .ett-status-stack{
 	display:flex;
@@ -242,6 +262,7 @@
 	gap:6px;
 }
 
+/* SSO status pills */
 .ett-sso-status{
 	margin-top:12px;
 	padding:8px 10px;
@@ -261,26 +282,43 @@
 	color:#663c00;
 }
 
-.ett-warning-box{
-	margin:10px 0 14px;
-	padding:12px;
-	border-radius:8px;
-	background:#fdecea;
-	border:1px solid #f5c2c7;
-	color:#842029;
-	font-weight:500;
+/* Disabled save button */
+#ett-save-selection:disabled,
+#ett-save-selection[disabled]{
+	opacity:0.55;
+	cursor:not-allowed;
 }
 
-#ett-job-phase.ett-phase-ok{ color:#1d7f2b; }
-#ett-job-phase.ett-phase-bad{ color:#b32d2e; }
-#ett-job-phase.ett-phase-warn{ color:#dba617; }
-
-.ett-sched-warning{
-	margin-top:8px;
-	padding:10px;
-	border-radius:8px;
-	background:#fff8e1;
-	border:1px solid #f0c36d;
-	color:#663c00;
-	font-weight:500;
+/* Confirmation layout */
+.ett-confirm-box{
+	display:flex;
+	align-items:center;
+	justify-content:space-between;
+	gap:12px;
 }
+
+.ett-confirm-text{ font-weight:600; }
+.ett-confirm-actions{ display:flex; gap:8px; }
+
+/* Utilities replacing inline styles */
+.ett-hidden{ display:none; }
+
+.ett-mt-6{ margin-top:6px !important; }
+.ett-mt-8{ margin-top:8px !important; }
+.ett-mt-10{ margin-top:10px !important; }
+.ett-mt-12{ margin-top:12px !important; }
+.ett-mb-0{ margin-bottom:0 !important; }
+
+.ett-muted-block{ margin:8px 0 12px; }
+
+.ett-list-disc{ margin:6px 0 10px 18px; list-style:disc; }
+.ett-list-disc.ett-tight{ margin:6px 0 0 18px; }
+.ett-list-decimal{ margin:6px 0 0 18px; list-style:decimal; }
+
+.ett-inline-form{ display:inline; }
+
+.ett-details{ margin:12px 0; }
+.ett-summary{ cursor:pointer; user-select:none; }
+
+.ett-history-wrap{ margin-top:10px; }
+.ett-history-table{ margin-top:8px; }
