@@ -94,7 +94,7 @@ class ETT_ExternalDB {
 	public static function ensure_schema() : void{
 		$pdo = self::pdo();
 
-		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_market_groups (
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_invMarketGroups (
 			market_group_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
 			parent_group_id BIGINT UNSIGNED NULL,
 			name VARCHAR(255) NOT NULL,
@@ -103,7 +103,7 @@ class ETT_ExternalDB {
 			KEY parent_group_id (parent_group_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
-		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_types (
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_invTypes (
 			type_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
 			market_group_id BIGINT UNSIGNED NULL,
@@ -111,13 +111,13 @@ class ETT_ExternalDB {
 			KEY market_group_id (market_group_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
-		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_meta_groups (
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_invMetaGroups (
 			meta_group_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
 			description TEXT NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
-		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_meta_types (
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_invMetaTypes (
 			type_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
 			parent_type_id BIGINT UNSIGNED NULL,
 			meta_group_id BIGINT UNSIGNED NOT NULL,
@@ -125,7 +125,15 @@ class ETT_ExternalDB {
 			KEY parent_type_id (parent_type_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
-		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_mfg_outputs (
+        $pdo->exec("CREATE TABLE IF NOT EXISTS ett_invTypeMaterials (
+            type_id BIGINT UNSIGNED NOT NULL,
+            material_type_id BIGINT UNSIGNED NOT NULL,
+            quantity BIGINT UNSIGNED NOT NULL,
+            PRIMARY KEY (type_id, material_type_id),
+            KEY material_type_id (material_type_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_industryActivityProducts (
 			product_type_id BIGINT UNSIGNED NOT NULL PRIMARY KEY
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
