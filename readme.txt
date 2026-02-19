@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.0.1
+Stable tag: 1.1.0
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -16,7 +16,13 @@ EVE Trade Tools Price Helper is an admin-only utility plugin for WordPress that 
 
 It provides a controlled interface for:
 
-* Importing static reference data from Fuzzwork (market groups, types, meta groups/types, industry activity products)
+* Importing static reference data from Fuzzwork:
+  - invMarketGroups
+  - invTypes (nodescription CSV)
+  - invMetaGroups
+  - invMetaTypes
+  - industryActivityProducts
+  - invTypeMaterials (CSV bz2)
 * Managing trade hubs and optional structure overrides
 * Connecting to EVE Online via ESI (including SSO for structures)
 * Running scheduled or manual price pulls
@@ -46,6 +52,20 @@ Yes. Scheduled runs use WordPress cron. For production reliability, a real syste
 
 == Changelog ==
 
+= 1.1.0 =
+* Added import of invTypeMaterials from Fuzzwork
+* Renamed external database tables to match Fuzzwork source file names exactly:
+  - ett_invMarketGroups
+  - ett_invTypes
+  - ett_invMetaGroups
+  - ett_invMetaTypes
+  - ett_industryActivityProducts
+  - ett_invTypeMaterials
+* Updated import routines to target renamed tables.
+* Updated schema creation logic to align with new table naming.
+* Updated admin import reporting to reflect new table names.
+* No frontend or pricing logic changes.
+
 = 1.0.1 =
 * Moved inline styles into `admin.css` and removed redundant CSS rules.
 
@@ -53,6 +73,9 @@ Yes. Scheduled runs use WordPress cron. For production reliability, a real syste
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.1.0 =
+Schema update: external database table names were aligned with Fuzzwork source file names. If upgrading from 1.0.x, ensure `ensure_schema()` runs or re-run the Fuzzwork import to initialize the renamed tables.
 
 = 1.0.1 =
 Maintenance release improving admin UI stability and internal structure. No database changes.
