@@ -5,7 +5,7 @@ class ETT_Market {
 	public static function get_tree(PDO $pdo) : array {
 		$rows = $pdo->query("
 			SELECT market_group_id, parent_group_id, name
-			FROM ett_market_groups
+			FROM ett_invMarketGroups
 			ORDER BY name ASC
 		")->fetchAll();
 
@@ -38,7 +38,7 @@ class ETT_Market {
 		$selected = array_values(array_unique(array_map('intval', $selected)));
 		if (!$selected) return [];
 
-		$rows = $pdo->query('SELECT market_group_id, parent_group_id FROM ett_market_groups')->fetchAll();
+		$rows = $pdo->query('SELECT market_group_id, parent_group_id FROM ett_invMarketGroups')->fetchAll();
 
 		$children = [];
 		foreach ($rows as $r) {
