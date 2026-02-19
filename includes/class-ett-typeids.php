@@ -29,12 +29,12 @@ class ETT_TypeIDs {
 					WHEN mg.name = 'Tech I' THEN 'Meta'
 					ELSE 'Other'
 				END AS meta_tier
-			FROM ett_types t
-			LEFT JOIN ett_meta_types mt
+			FROM ett_invTypes t
+			LEFT JOIN ett_invMetaTypes mt
 				ON mt.type_id = t.type_id
-			LEFT JOIN ett_meta_groups mg
+			LEFT JOIN ett_invMetaGroups mg
 				ON mg.meta_group_id = mt.meta_group_id
-			LEFT JOIN ett_mfg_outputs mo
+			LEFT JOIN ett_industryActivityProducts mo
 				ON mo.product_type_id = t.type_id
 			WHERE t.published = 1
 				AND t.market_group_id IN ($in)
