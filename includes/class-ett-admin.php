@@ -654,6 +654,7 @@ class ETT_Admin {
 						<li><code>invMetaGroups</code></li>
 						<li><code>invMetaTypes</code></li>
 						<li><code>industryActivityProducts</code> (blueprint activity outputs)</li>
+						<li><code>invTypeMaterials</code> (CSV bz2)</li>
 					</ul>
 
 					<p class="description">
@@ -670,10 +671,9 @@ class ETT_Admin {
                     $last_import_txt = !empty($import_meta['imported_at']) ? (string)$import_meta['imported_at'] : 'Never';
                     
                     $parts = [];
-                    foreach (['market_groups','types','meta_groups','meta_types','mfg_outputs'] as $k){
+                    foreach (['invMarketGroups','invTypes','invMetaGroups','invMetaTypes','industryActivityProducts','invTypeMaterials'] as $k){
                     	if (isset($import_meta[$k])) $parts[] = $k . ': ' . number_format((int)$import_meta[$k]);
                     }
-                    if (isset($import_meta['elapsed_s'])) $parts[] = 'elapsed_s: ' . number_format((float)$import_meta['elapsed_s'], 2);
                     $details_txt = !empty($parts) ? implode(' | ', $parts) : '';
                     ?>
                     
@@ -1414,11 +1414,14 @@ class ETT_Admin {
 		}
 
 		try {
-			$t0 = microtime(true);
-			$meta = ETT_Fuzzwork::import_all($pdo);
-			$meta['elapsed_s'] = microtime(true) - $t0;
-
-			update_option(self::OPT_LAST_IMPORT, $meta, false);
+            $t0 = microtime(true);
+            $meta = ETT_Fuzzwork::import_all($pdo);
+            $elapsed_s = microtime(true) - $t0; // keep if you want for debug, but don't store/display
+            
+            // Ensure old installs can't keep showing it if you ever re-add display logic later
+            unset($meta['elapsed_s']);
+            
+            update_option(self::OPT_LAST_IMPORT, $meta, false);
 
 			$url = add_query_arg(['page' => self::SLUG, 'imported' => 1], admin_url('admin.php'));
             wp_safe_redirect($url);
@@ -1461,19 +1464,19 @@ class ETT_Admin {
     	}
     
     	try {
-    		$t0 = microtime(true);
-    		$meta = ETT_Fuzzwork::import_all($pdo);
-    		$meta['elapsed_s'] = microtime(true) - $t0;
-    
-    		update_option(self::OPT_LAST_IMPORT, $meta, false);
-    
+            $t0 = microtime(true);
+            $meta = ETT_Fuzzwork::import_all($pdo);
+            $elapsed_s = microtime(true) - $t0; // optional local debug only
+            
+            unset($meta['elapsed_s']);
+            update_option(self::OPT_LAST_IMPORT, $meta, false);
+            
             $parts = [];
-            foreach (['market_groups','types','meta_groups','meta_types','mfg_outputs'] as $k){
+            foreach (['invMarketGroups','invTypes','invMetaGroups','invMetaTypes','industryActivityProducts','invTypeMaterials'] as $k){
             	if (isset($meta[$k])) $parts[] = $k . ': ' . number_format((int)$meta[$k]);
             }
-            if (isset($meta['elapsed_s'])) $parts[] = 'elapsed_s: ' . number_format((float)$meta['elapsed_s'], 2);
             $details_txt = !empty($parts) ? implode(' | ', $parts) : '';
-            
+
             wp_send_json_success([
             	'imported'    => true,
             	'imported_at' => $meta['imported_at'] ?? current_time('mysql'),
