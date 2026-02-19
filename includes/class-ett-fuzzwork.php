@@ -7,6 +7,8 @@ class ETT_Fuzzwork {
 	const INV_METAGROUPS_BZ2    = 'https://www.fuzzwork.co.uk/dump/latest/invMetaGroups.sql.bz2';
 	const INV_METATYPES_BZ2     = 'https://www.fuzzwork.co.uk/dump/latest/invMetaTypes.sql.bz2';
 	const IAP_BZ2               = 'https://www.fuzzwork.co.uk/dump/latest/industryActivityProducts.sql.bz2';
+	const INV_TYPE_MATERIALS_CSV_BZ2 = 'https://www.fuzzwork.co.uk/dump/latest/invTypeMaterials.csv.bz2';
+
 
 	// Sanity limits (hardening against corrupted/unexpected downloads)
 	const MAX_DOWNLOAD_BYTES      = 300000000; // 300 MB
@@ -50,6 +52,7 @@ class ETT_Fuzzwork {
 		$mtt_bz2 = $dir . 'invMetaTypes.sql.bz2';
 		$iap_bz2 = $dir . 'industryActivityProducts.sql.bz2';
 		$ty_csv  = $dir . 'invTypes-nodescription.csv';
+		$itm_bz2 = $dir . 'invTypeMaterials.csv.bz2';
 
 		try { self::download_to_file(self::INV_MARKETGROUPS_BZ2, $mg_bz2); }
 		catch (Exception $e){ throw new Exception(sprintf('Download invMarketGroups failed: %s', esc_html(wp_strip_all_tags($e->getMessage())))); }
@@ -66,6 +69,9 @@ class ETT_Fuzzwork {
 		try { self::download_to_file(self::INV_TYPES_CSV, $ty_csv); }
 		catch (Exception $e){ throw new Exception(sprintf('Download invTypes CSV failed: %s', esc_html(wp_strip_all_tags($e->getMessage())))); }
 
+        try { self::download_to_file(self::INV_TYPE_MATERIALS_CSV_BZ2, $itm_bz2); }
+        catch (Exception $e){ throw new Exception(sprintf('Download invTypeMaterials failed: %s', esc_html(wp_strip_all_tags($e->getMessage())))); }
+
 		try { $mg_count = self::import_market_groups_from_bz2_sql($pdo, $mg_bz2); }
 		catch (Exception $e){ throw new Exception(sprintf('Import invMarketGroups failed: %s', esc_html(wp_strip_all_tags($e->getMessage())))); }
 
@@ -81,12 +87,16 @@ class ETT_Fuzzwork {
 		try { $ty_count = self::import_types_from_csv($pdo, $ty_csv); }
 		catch (Exception $e){ throw new Exception(sprintf('Import invTypes CSV failed: %s', esc_html(wp_strip_all_tags($e->getMessage())))); }
 
+        try { $itm_count = self::import_type_materials_from_csv_bz2($pdo, $itm_bz2); }
+        catch (Exception $e){ throw new Exception(sprintf('Import invTypeMaterials failed: %s', esc_html(wp_strip_all_tags($e->getMessage())))); }
+
 		return [
-			'market_groups' => $mg_count,
-			'meta_groups'   => $mgg_count,
-			'meta_types'    => $mtt_count,
-			'mfg_outputs'   => $mfg_count,
-			'types'         => $ty_count,
+            'invMarketGroups'          => $mg_count,
+            'invTypes'                 => $ty_count,
+            'invMetaGroups'            => $mgg_count,
+            'invMetaTypes'             => $mtt_count,
+            'industryActivityProducts' => $mfg_count,
+            'invTypeMaterials'         => $itm_count,
 			'imported_at'   => gmdate('Y-m-d H:i:s') . ' UTC',
 		];
 	}
@@ -148,12 +158,12 @@ class ETT_Fuzzwork {
 	}
 
 	private static function import_market_groups_from_bz2_sql(PDO $pdo, string $bz2_path) : int{
-		$pdo->exec('TRUNCATE TABLE ett_market_groups');
+		$pdo->exec('TRUNCATE TABLE ett_invMarketGroups');
 
 		$bz = bzopen($bz2_path, 'r');
 		if (!$bz) throw new Exception('Failed opening bz2: ' . esc_html(wp_strip_all_tags($bz2_path)));
 
-		$insert = $pdo->prepare("INSERT INTO ett_market_groups (market_group_id, parent_group_id, name, description, has_types)
+		$insert = $pdo->prepare("INSERT INTO ett_invMarketGroups (market_group_id, parent_group_id, name, description, has_types)
 			VALUES (:id,:pid,:name,:desc,:has)");
 
 		$buffer = '';
@@ -225,7 +235,7 @@ class ETT_Fuzzwork {
 	}
 
 	private static function import_meta_groups_from_bz2_sql(PDO $pdo, string $bz2_path) : int{
-		$pdo->exec('TRUNCATE TABLE ett_meta_groups');
+		$pdo->exec('TRUNCATE TABLE ett_invMetaGroups');
 
 		$table_name = 'invMetaGroups';
 		$idx = self::get_sql_column_index_map($bz2_path, $table_name, ['metaGroupID','metaGroupName','description']);
@@ -239,7 +249,7 @@ class ETT_Fuzzwork {
 		$bz = bzopen($bz2_path, 'r');
 		if (!$bz) throw new Exception('Failed opening bz2: ' . esc_html(wp_strip_all_tags($bz2_path)));
 
-		$insert = $pdo->prepare("INSERT INTO ett_meta_groups (meta_group_id, name, description)
+		$insert = $pdo->prepare("INSERT INTO ett_invMetaGroups (meta_group_id, name, description)
 			VALUES (:id,:name,:desc)");
 
 		$buffer = '';
@@ -307,7 +317,7 @@ class ETT_Fuzzwork {
 	}
 
 	private static function import_meta_types_from_bz2_sql(PDO $pdo, string $bz2_path) : int{
-		$pdo->exec('TRUNCATE TABLE ett_meta_types');
+		$pdo->exec('TRUNCATE TABLE ett_invMetaTypes');
 
 		$table_name = 'invMetaTypes';
 		$idx = self::get_sql_column_index_map($bz2_path, $table_name, ['typeID','metaGroupID']);
@@ -321,7 +331,7 @@ class ETT_Fuzzwork {
 		$bz = bzopen($bz2_path, 'r');
 		if (!$bz) throw new Exception('Failed opening bz2: ' . esc_html(wp_strip_all_tags($bz2_path)));
 
-		$insert = $pdo->prepare("INSERT INTO ett_meta_types (type_id, meta_group_id)
+		$insert = $pdo->prepare("INSERT INTO ett_invMetaTypes (type_id, meta_group_id)
 			VALUES (:tid,:mgid)");
 
 		$buffer = '';
@@ -387,7 +397,7 @@ class ETT_Fuzzwork {
 	}
 
 	private static function import_mfg_outputs_from_iap_bz2_sql(PDO $pdo, string $bz2_path) : int{
-		$pdo->exec('TRUNCATE TABLE ett_mfg_outputs');
+		$pdo->exec('TRUNCATE TABLE ett_industryActivityProducts');
 
 		$table_name = 'industryActivityProducts';
 		$idx = self::get_sql_column_index_map($bz2_path, $table_name, ['productTypeID','activityID']);
@@ -401,7 +411,7 @@ class ETT_Fuzzwork {
 		$bz = bzopen($bz2_path, 'r');
 		if (!$bz) throw new Exception('Failed opening bz2: ' . esc_html(wp_strip_all_tags($bz2_path)));
 
-		$insert = $pdo->prepare("INSERT IGNORE INTO ett_mfg_outputs (product_type_id)
+		$insert = $pdo->prepare("INSERT IGNORE INTO ett_industryActivityProducts (product_type_id)
 			VALUES (:pid)");
 
 		$buffer = '';
@@ -466,7 +476,7 @@ class ETT_Fuzzwork {
 	}
 
 	private static function import_types_from_csv(PDO $pdo, string $csv_path) : int{
-		$pdo->exec('TRUNCATE TABLE ett_types');
+		$pdo->exec('TRUNCATE TABLE ett_invTypes');
 
 		$fh = fopen($csv_path, 'r'); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 		if (!$fh) throw new Exception('Failed opening CSV: ' . esc_html(wp_strip_all_tags($csv_path)));
@@ -498,7 +508,7 @@ class ETT_Fuzzwork {
 			$pendingFirstDataRow = $first;
 		}
 
-		$insert = $pdo->prepare('INSERT INTO ett_types (type_id, name, market_group_id, published) VALUES (:id,:name,:mg,:pub)');
+		$insert = $pdo->prepare('INSERT INTO ett_invTypes (type_id, name, market_group_id, published) VALUES (:id,:name,:mg,:pub)');
 		$count = 0;
 
 		$toBoolInt = function($v){
@@ -538,6 +548,121 @@ class ETT_Fuzzwork {
 		fclose($fh); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		return $count;
 	}
+
+    private static function import_type_materials_from_csv_bz2(PDO $pdo, string $bz2_path) : int {
+        $pdo->exec('TRUNCATE TABLE ett_invTypeMaterials');
+    
+        $bz = bzopen($bz2_path, 'r');
+        if (!$bz) {
+            throw new Exception('Failed opening bz2: ' . esc_html(wp_strip_all_tags($bz2_path)));
+        }
+    
+        $insert = $pdo->prepare('INSERT INTO ett_invTypeMaterials (type_id, material_type_id, quantity) VALUES (:tid,:mid,:qty)');
+        $count  = 0;
+    
+        $buffer = '';
+        $isFirstLine = true;
+    
+        // Default column mapping if no header is present (typical order)
+        $col = [
+            'typeid' => 0,
+            'materialtypeid' => 1,
+            'quantity' => 2,
+        ];
+    
+        try {
+            while (!feof($bz)) {
+                $chunk = bzread($bz, 8192);
+                if ($chunk === false) break;
+    
+                $buffer .= $chunk;
+    
+                if (strlen($buffer) > self::MAX_BUFFER_BYTES) {
+                    throw new Exception('invTypeMaterials: buffer exceeded safety limit (corrupt/unexpected file).');
+                }
+    
+                while (($nl = strpos($buffer, "\n")) !== false) {
+                    $line = rtrim(substr($buffer, 0, $nl), "\r\n");
+                    $buffer = substr($buffer, $nl + 1);
+    
+                    if ($line === '') continue;
+    
+                    $row = str_getcsv($line);
+    
+                    // Handle header detection on first non-empty line
+                    if ($isFirstLine) {
+                        $isFirstLine = false;
+    
+                        if (isset($row[0])) $row[0] = preg_replace('/^\xEF\xBB\xBF/', '', (string)$row[0]);
+                        $lower = array_map(function($v){ return strtolower(trim((string)$v)); }, $row);
+    
+                        $hasHeader = in_array('typeid', $lower, true)
+                                  && in_array('materialtypeid', $lower, true)
+                                  && in_array('quantity', $lower, true);
+    
+                        if ($hasHeader) {
+                            $col = [];
+                            foreach ($lower as $i => $name) $col[$name] = $i;
+    
+                            foreach (['typeid','materialtypeid','quantity'] as $need) {
+                                if (!isset($col[$need])) {
+                                    throw new Exception(sprintf('invTypeMaterials CSV missing column: %s', esc_html(wp_strip_all_tags($need))));
+                                }
+                            }
+                            continue; // next line will be first data line
+                        }
+                        // else: first line is data, fall through and process it
+                    }
+    
+                    $maxIdx = max($col['typeid'], $col['materialtypeid'], $col['quantity']);
+                    if (count($row) <= $maxIdx) continue;
+    
+                    $tid = (int)$row[$col['typeid']];
+                    $mid = (int)$row[$col['materialtypeid']];
+                    $qtyRaw = $row[$col['quantity']];
+    
+                    if ($tid <= 0 || $mid <= 0) continue;
+    
+                    // quantity can be integer-like; treat empty as 0
+                    $qty = ($qtyRaw === '' ? 0 : (int)$qtyRaw);
+                    if ($qty <= 0) continue;
+    
+                    $insert->execute([
+                        ':tid' => $tid,
+                        ':mid' => $mid,
+                        ':qty' => $qty,
+                    ]);
+    
+                    $count++;
+                }
+            }
+    
+            // Process any remaining buffer as a last line (no trailing newline)
+            $tail = trim($buffer);
+            if ($tail !== '') {
+                $row = str_getcsv($tail);
+    
+                $maxIdx = max($col['typeid'], $col['materialtypeid'], $col['quantity']);
+                if (count($row) > $maxIdx) {
+                    $tid = (int)$row[$col['typeid']];
+                    $mid = (int)$row[$col['materialtypeid']];
+                    $qtyRaw = $row[$col['quantity']];
+                    if ($tid > 0 && $mid > 0) {
+                        $qty = ($qtyRaw === '' ? 0 : (int)$qtyRaw);
+                        if ($qty > 0) {
+                            $insert->execute([':tid'=>$tid, ':mid'=>$mid, ':qty'=>$qty]);
+                            $count++;
+                        }
+                    }
+                }
+            }
+    
+        } finally {
+            bzclose($bz);
+        }
+    
+        return $count;
+    }
 
     private static function get_sql_column_index_map(string $bz2_path, string $table_name, array $expected_columns) : array{
     	$bz = bzopen($bz2_path, 'r');
