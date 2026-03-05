@@ -170,6 +170,15 @@ class ETT_ExternalDB {
 			KEY type_id (type_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_market_history (
+			hub_key VARCHAR(32) NOT NULL,
+			type_id BIGINT UNSIGNED NOT NULL,
+			avg_daily_volume DECIMAL(15,2) NULL,
+			fetched_at DATETIME NOT NULL,
+			PRIMARY KEY (hub_key, type_id),
+			KEY type_id (type_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
 		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_jobs (
 			job_id CHAR(36) NOT NULL PRIMARY KEY,
 			job_type VARCHAR(32) NOT NULL,
