@@ -3,11 +3,13 @@ if (!defined('ABSPATH')) exit;
 
 class ETT_Jobs {
 	const JOB_RETENTION_DAYS = 90;
-	const OPT_CRON_ACTIVE_JOB_ID = 'ett_ph_cron_prices_job_id';
+	const OPT_CRON_ACTIVE_JOB_ID         = 'ett_ph_cron_prices_job_id';
+	const OPT_CRON_ACTIVE_HISTORY_JOB_ID = 'ett_ph_cron_history_job_id';
 
 	public static function init_cron() {
 		add_action('ett_ph_prices_scheduled_start', [__CLASS__, 'cron_prices_scheduled_start'], 10, 1);
 		add_action('ett_ph_prices_tick', [__CLASS__, 'cron_prices_tick'], 10, 1);
+		add_action('ett_ph_history_tick', [__CLASS__, 'cron_history_tick'], 10, 1);
 	}
 
 	public static function activate_cron() {
@@ -193,6 +195,8 @@ class ETT_Jobs {
             do {
             	if ($job['job_type'] === 'typeids') {
             		$progress = self::step_typeids($pdo, $progress);
+            	} elseif ($job['job_type'] === 'history') {
+            		$progress = self::step_history($pdo, $progress);
             	} else {
             		$progress = self::step_prices($pdo, $progress, $job_id);
             	}
@@ -471,6 +475,8 @@ class ETT_Jobs {
             do {
             	if ($job['job_type'] === 'typeids') {
             		$progress = self::step_typeids($pdo, $progress);
+            	} elseif ($job['job_type'] === 'history') {
+            		$progress = self::step_history($pdo, $progress);
             	} else {
             		$progress = self::step_prices($pdo, $progress, $job_id);
             	}
@@ -943,6 +949,16 @@ class ETT_Jobs {
 			}
 		}
 
+		// Auto-create history job when a prices job completes successfully
+		if ($status === 'done' && isset($progress['job_type']) && $progress['job_type'] === 'prices') {
+			try {
+				$history_job_id = self::create_job($pdo, 'history', $progress['driver'] ?? 'browser');
+				$progress['history_job_id'] = $history_job_id;
+			} catch (\Throwable $e) {
+				self::debug_log('[ETT] Could not create history job: ' . $e->getMessage());
+			}
+		}
+
 		$now = current_time('mysql');
 		$stmt = $pdo->prepare("
 			UPDATE ett_jobs
@@ -976,6 +992,13 @@ class ETT_Jobs {
 		try {
 			if ($status === 'done' && isset($progress['job_type']) && $progress['job_type'] === 'prices') {
 				update_option('ett_last_price_run_completed_at', current_time('mysql'), false);
+
+				// For cron-driven runs, schedule the history job tick immediately
+				$h_id = $progress['history_job_id'] ?? '';
+				if ($h_id !== '' && ($progress['driver'] ?? '') === 'cron') {
+					update_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID, $h_id, false);
+					wp_schedule_single_event(time() + 1, 'ett_ph_history_tick', [$h_id]);
+				}
 			}
         } catch (Exception $e) {
         	self::debug_log('[ETT] finish() housekeeping failed: ' . $e->getMessage());
@@ -1044,5 +1067,298 @@ class ETT_Jobs {
 		$d[6] = chr((ord($d[6]) & 0x0f) | 0x40);
 		$d[8] = chr((ord($d[8]) & 0x3f) | 0x80);
 		return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($d), 4));
+	}
+
+	// ── History job ────────────────────────────────────────────────────────
+
+	public static function cron_history_tick(string $job_id) : void {
+		if (!$job_id) return;
+
+		$active = (string) get_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID, '');
+		if ($active !== $job_id) return;
+
+		try {
+			$pdo = ETT_ExternalDB::pdo();
+			$job = self::get_job($pdo, $job_id);
+
+			if (!$job) {
+				delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
+				return;
+			}
+
+			if (in_array($job['status'], ['done', 'error', 'cancelled'], true)) {
+				delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
+				return;
+			}
+
+			self::update_status($pdo, $job_id, 'running');
+			$progress = json_decode($job['progress_json'], true) ?: [];
+
+			[$max_pages, $max_seconds] = self::get_batch_limits();
+			$deadline   = microtime(true) + $max_seconds;
+			$pages_done = 0;
+
+			do {
+				$progress = self::step_history($pdo, $progress);
+				self::heartbeat($pdo, $job_id, $progress);
+				$pages_done++;
+
+				if (($progress['phase'] ?? '') === 'done') break;
+			} while ($pages_done < $max_pages && microtime(true) < $deadline);
+
+			if (($progress['phase'] ?? '') === 'done') {
+				self::finish($pdo, $job_id, 'done', $progress);
+				delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
+				return;
+			}
+
+			self::heartbeat($pdo, $job_id, $progress);
+			wp_schedule_single_event(time() + 1, 'ett_ph_history_tick', [$job_id]);
+
+		} catch (\Throwable $e) {
+			self::debug_log('[ETT] cron_history_tick error: ' . $e->getMessage());
+			try {
+				$pdo = ETT_ExternalDB::pdo();
+				$job = self::get_job($pdo, $job_id);
+				$progress = $job ? (json_decode($job['progress_json'], true) ?: []) : [];
+				$progress['phase']    = 'error';
+				$progress['last_msg'] = 'Error: ' . $e->getMessage();
+				$progress['error']    = ['message' => $e->getMessage()];
+				self::finish($pdo, $job_id, 'error', $progress, $e->getMessage());
+			} catch (\Throwable $e2) {}
+			delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
+		}
+	}
+
+	// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared
+	private static function step_history(PDO $pdo, array $progress) : array {
+		$batch_size = 50;
+
+		// ── Init phase: resolve regions + count type_ids ──────────────────
+		if (($progress['phase'] ?? 'init') === 'init') {
+			$selected_hubs = get_option(ETT_Admin::OPT_SELECTED_HUBS, []);
+			if (!is_array($selected_hubs) || empty($selected_hubs)) {
+				$selected_hubs = array_keys(ETT_Admin::hubs());
+			}
+
+			$all_hubs    = ETT_Admin::hubs();
+    		$regions     = [];
+    		$seen_region = [];
+    		foreach ($selected_hubs as $hub_key) {
+    			if (!isset($all_hubs[$hub_key])) continue;
+    			$region_id = (int) $all_hubs[$hub_key]['region_id'];
+    			if (isset($seen_region[$region_id])) continue; // Rens and Hek share Heimatar — fetch once
+    			$seen_region[$region_id] = true;
+    			$regions[] = [
+    				'hub_key'   => $hub_key,
+    				'region_id' => $region_id,
+    			];
+    		}
+
+			if (empty($regions)) {
+				$progress['phase']    = 'done';
+				$progress['last_msg'] = 'No hubs configured.';
+				return $progress;
+			}
+
+			$type_count = (int) ($pdo->query('SELECT COUNT(*) FROM ett_selected_typeids')->fetchColumn() ?: 0);
+
+			if ($type_count === 0) {
+				$progress['phase']    = 'done';
+				$progress['last_msg'] = 'No type IDs found. Run Generate TypeIDs first.';
+				return $progress;
+			}
+
+			$progress['phase']          = 'fetching';
+			$progress['regions']        = $regions;
+			$progress['region_idx']     = 0;
+			$progress['type_idx']       = 0;
+			$progress['type_count']     = $type_count;
+			$progress['items_done']     = 0;
+			$progress['items_total']    = $type_count * count($regions);
+			$progress['rows_written']   = 0;
+			$progress['current_region'] = $regions[0]['hub_key'];
+			$progress['last_msg']       = 'Initialised. Starting fetch…';
+			return $progress;
+		}
+
+		// ── Fetch phase ───────────────────────────────────────────────────
+		$regions    = $progress['regions']    ?? [];
+		$region_idx = (int) ($progress['region_idx'] ?? 0);
+		$type_idx   = (int) ($progress['type_idx']   ?? 0);
+		$type_count = (int) ($progress['type_count'] ?? 0);
+
+		if ($region_idx >= count($regions)) {
+			$progress['phase']    = 'done';
+			$progress['last_msg'] = 'Market history fetch complete.';
+			return $progress;
+		}
+
+		$region    = $regions[$region_idx];
+		$hub_key   = $region['hub_key'];
+		$region_id = (int) $region['region_id'];
+
+		// Pull next batch of type_ids from DB by offset (avoids storing the full list in progress_json)
+		$stmt = $pdo->prepare('SELECT type_id FROM ett_selected_typeids ORDER BY type_id ASC LIMIT ? OFFSET ?');
+		$stmt->bindValue(1, $batch_size, PDO::PARAM_INT);
+		$stmt->bindValue(2, $type_idx,   PDO::PARAM_INT);
+		$stmt->execute();
+		$batch = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+
+		if (empty($batch)) {
+			// Region exhausted — advance
+			$region_idx++;
+			$progress['region_idx'] = $region_idx;
+			$progress['type_idx']   = 0;
+
+			if ($region_idx >= count($regions)) {
+				$progress['phase']    = 'done';
+				$progress['last_msg'] = 'Market history fetch complete.';
+			} else {
+				$progress['current_region'] = $regions[$region_idx]['hub_key'];
+				$progress['last_msg']       = 'Starting hub: ' . $regions[$region_idx]['hub_key'];
+			}
+			return $progress;
+		}
+
+		// Parallel ESI fetch
+		$results = self::curl_multi_history($region_id, $batch);
+
+		// Track rate limiting and errors
+		if (!isset($progress['rate_limited_seen'])) $progress['rate_limited_seen'] = false;
+		if (!isset($progress['warnings']))          $progress['warnings']          = [];
+		if (!isset($progress['error_count']))       $progress['error_count']       = 0;
+
+		$has_429 = false;
+		foreach ($results as $type_id => $result) {
+			$code = (int) ($result['code'] ?? 0);
+			if ($code === 429) {
+				$has_429 = true;
+			} elseif ($code !== 200 && $code !== 0) {
+				$progress['error_count']++;
+				if ($progress['error_count'] <= 10) {
+					$progress['warnings'][] = "HTTP {$code} for type_id {$type_id} (region {$region_id})";
+				}
+			}
+		}
+
+		if ($has_429) {
+			$progress['rate_limited_seen'] = true;
+			$progress['warning_msg']       = 'Rate limiting encountered during history fetch. Backing off and retrying.';
+			$progress['sleep_until']       = time() + 60;
+			return $progress;
+		}
+
+		// Compute 30-day rolling average and bulk-insert
+		$now    = current_time('mysql');
+		$cutoff = date('Y-m-d', strtotime('-30 days'));
+
+		$placeholders = [];
+		$params       = [];
+
+		foreach ($results as $type_id => $result) {
+			$data = $result['data'] ?? [];
+			$avg  = 0.0;
+			if (!empty($data)) {
+				$recent = array_filter($data, fn($d) => isset($d['date']) && $d['date'] >= $cutoff);
+				if (!empty($recent)) {
+					$total = array_sum(array_column($recent, 'volume'));
+					$days  = count($recent);
+					$avg   = $days > 0 ? round($total / $days, 2) : 0.0;
+				}
+			}
+			$placeholders[] = '(?,?,?,?)';
+			$params[]       = $hub_key;
+			$params[]       = (int) $type_id;
+			$params[]       = $avg;
+			$params[]       = $now;
+		}
+
+		if (!empty($placeholders)) {
+			$sql = 'INSERT INTO ett_market_history (hub_key, type_id, avg_daily_volume, fetched_at) VALUES ' .
+			       implode(',', $placeholders) .
+			       ' ON DUPLICATE KEY UPDATE avg_daily_volume = VALUES(avg_daily_volume), fetched_at = VALUES(fetched_at)';
+			$pdo->prepare($sql)->execute($params);
+		}
+
+		$fetched = count($batch);
+		$type_idx += $fetched;
+
+		$progress['type_idx']     = $type_idx;
+		$progress['items_done']   = ($progress['items_done'] ?? 0) + $fetched;
+		$progress['rows_written'] = ($progress['rows_written'] ?? 0) + $fetched;
+		$progress['current_region'] = $hub_key;
+
+		$done  = (int) ($progress['items_done'] ?? 0);
+		$total = (int) ($progress['items_total'] ?? 1);
+		$pct   = $total > 0 ? round($done / $total * 100, 1) : 0.0;
+		$progress['last_msg'] = "Hub {$hub_key}: {$done}/{$total} ({$pct}%)";
+
+		// Check if this region is now exhausted
+		if ($type_idx >= $type_count) {
+			$region_idx++;
+			$progress['region_idx'] = $region_idx;
+			$progress['type_idx']   = 0;
+
+			if ($region_idx >= count($regions)) {
+				$progress['phase']    = 'done';
+				$progress['last_msg'] = 'Market history fetch complete.';
+			} else {
+				$progress['current_region'] = $regions[$region_idx]['hub_key'];
+			}
+		}
+
+		return $progress;
+	}
+	// phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
+
+	private static function curl_multi_history(int $region_id, array $type_ids) : array {
+		$mh      = curl_multi_init();
+		$handles = [];
+
+		foreach ($type_ids as $type_id) {
+			$url = "https://esi.evetech.net/latest/markets/{$region_id}/history/?type_id={$type_id}&datasource=tranquility";
+			$ch  = curl_init($url);
+			curl_setopt_array($ch, [
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_TIMEOUT        => 30,
+				CURLOPT_CONNECTTIMEOUT => 10,
+				CURLOPT_HTTPHEADER     => [
+					'Accept: application/json',
+					'User-Agent: ETT-Price-Helper/WordPress',
+				],
+			]);
+			$handles[$type_id] = $ch;
+			curl_multi_add_handle($mh, $ch);
+		}
+
+		do {
+			$status = curl_multi_exec($mh, $active);
+			if ($active) curl_multi_select($mh, 1.0);
+		} while ($active && $status === CURLM_OK);
+
+		$results = [];
+		foreach ($handles as $type_id => $ch) {
+			$body = curl_multi_getcontent($ch);
+			$code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+			curl_multi_remove_handle($mh, $ch);
+			curl_close($ch);
+
+			if ($code === 200 && $body !== '') {
+				$decoded           = json_decode($body, true);
+				$results[$type_id] = [
+					'code' => 200,
+					'data' => is_array($decoded) ? $decoded : [],
+				];
+			} else {
+				$results[$type_id] = [
+					'code' => $code,
+					'data' => [],
+				];
+			}
+		}
+
+		curl_multi_close($mh);
+		return $results;
 	}
 }
