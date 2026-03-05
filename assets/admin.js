@@ -4,6 +4,15 @@
 	let statusTimer = null;
 	let stepTimer = null;
 	let historyTimer = null;
+
+	// History job state
+	let historyJobId        = null;
+	let historyRunning      = false;
+	let historyStepTimer    = null;
+	let historyStepInFlight = false;
+	let historyRunGen       = 0;
+	let historyStartedAtMs  = null;
+	let historyElapsedTimer = null;
 	let idleAttachTimer = null;
 	let terminalAlertShown = false;
 	let elapsedTimer = null;
@@ -22,6 +31,179 @@
     let stepInFlight = false;
 
 	function nowMs(){ return Date.now(); }
+
+	// ── History job functions ─────────────────────────────────────────────
+
+	function startHistoryElapsedTicker(){
+		if (historyElapsedTimer) clearInterval(historyElapsedTimer);
+		const tick = () => {
+			if (!historyStartedAtMs) return;
+			const secs = Math.floor((Date.now() - historyStartedAtMs) / 1000);
+			$('#ett-history-kpi-elapsed').text(formatHMS(secs));
+		};
+		tick();
+		historyElapsedTimer = setInterval(tick, 1000);
+	}
+
+	function stopHistoryElapsedTicker(){
+		if (historyElapsedTimer) clearInterval(historyElapsedTimer);
+		historyElapsedTimer = null;
+		historyStartedAtMs  = null;
+	}
+
+	function setHistoryHeartbeat(tsMysql){
+		const el  = $('#ett-history-heartbeat');
+		const dot = el.find('.ett-dot');
+		const txt = el.find('.ett-hb-text');
+
+		if (!tsMysql){
+			dot.removeClass('ok bad');
+			txt.text('No heartbeat');
+			return;
+		}
+
+		const hb    = new Date(tsMysql.replace(' ', 'T'));
+		const delta = nowMs() - hb.getTime();
+
+		if (isNaN(delta)){
+			dot.removeClass('ok bad');
+			txt.text('Heartbeat unknown');
+			return;
+		}
+
+		if (delta <= 15000){
+			dot.removeClass('bad').addClass('ok');
+			txt.text('Heartbeat OK');
+		} else {
+			dot.removeClass('ok').addClass('bad');
+			txt.text('Heartbeat stale');
+		}
+	}
+
+	function renderHistoryProgress(progress){
+		progress = progress || {};
+		const phase = (progress.phase || '').toLowerCase();
+
+		let phaseText = '—';
+		if (phase === 'queued')   phaseText = 'Queued';
+		else if (phase === 'init')     phaseText = 'Initialising…';
+		else if (phase === 'fetching') phaseText = 'Fetching market history…';
+		else if (phase === 'done')     phaseText = 'Completed.';
+		else if (phase === 'error')    phaseText = 'Error.';
+		else if (phase === 'cancelled') phaseText = 'Cancelled.';
+		else if (phase)                phaseText = phase;
+
+		$('#ett-history-phase').text(phaseText);
+
+		const warn = progress.warning_msg || '';
+		if (warn){
+			let warnEl = $('#ett-history-warn');
+			if (!warnEl.length){
+				$('#ett-history-progress .ett-progress-head').after('<div id="ett-history-warn" class="ett-sub" style="color:#dba617;margin-top:4px;"></div>');
+				warnEl = $('#ett-history-warn');
+			}
+			warnEl.text(warn).show();
+		} else {
+			$('#ett-history-warn').hide().text('');
+		}
+
+		const histMsg = (progress.last_msg || '—').replace(
+			/^Hub\s+([a-z0-9_]+):/i,
+			(m, key) => 'Hub ' + hubLabel(key) + ':'
+		);
+		$('#ett-history-msg').text(histMsg);
+		$('#ett-history-kpi-hub').text(progress.current_region ? hubLabel(progress.current_region) : '—');
+		$('#ett-history-kpi-done').text(fmtInt(progress.items_done));
+		$('#ett-history-kpi-total').text(fmtInt(progress.items_total));
+		$('#ett-history-kpi-written').text(fmtInt(progress.rows_written));
+
+		const done  = Number(progress.items_done  || 0);
+		const total = Number(progress.items_total || 0);
+		const pct   = total > 0 ? Math.min(100, Math.round(done / total * 100)) : 0;
+		$('#ett-history-bar').css('width', pct + '%');
+		$('#ett-history-bar-pct').text(pct + '%');
+
+		const jsonOut = Object.assign({}, progress);
+		if (historyStartedAtMs){
+			const secs = Math.floor((Date.now() - historyStartedAtMs) / 1000);
+			jsonOut.elapsed_seconds = secs;
+			jsonOut.elapsed_hms     = formatHMS(secs);
+		}
+		$('#ett-history-progress-json').text(JSON.stringify(jsonOut, null, 2));
+	}
+
+	function stopHistoryJob(){
+		historyRunGen++;
+		historyRunning      = false;
+		historyJobId        = null;
+		historyStepInFlight = false;
+		if (historyStepTimer) clearInterval(historyStepTimer);
+		historyStepTimer = null;
+		stopHistoryElapsedTicker();
+		$('#ett-btn-cancel').prop('disabled', true).text('Cancel');
+
+		const $runBtn = $('#ett-btn-run');
+		if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
+		$runBtn.prop('disabled', false);
+		btnSetLabel($runBtn, runBtnLabel);
+	}
+
+	function startHistoryJob(jobId){
+		if (historyRunning) return;
+
+		historyJobId       = jobId;
+		historyRunning     = true;
+		historyStartedAtMs = Date.now();
+		historyRunGen++;
+
+		$('#ett-history-progress').show();
+		renderHistoryProgress({ phase: 'queued', last_msg: 'Starting history fetch…' });
+		startHistoryElapsedTicker();
+
+		$('#ett-btn-cancel').prop('disabled', false).text('Cancel History');
+
+		const myGen = historyRunGen;
+
+		async function doHistoryStep(){
+			if (!historyRunning || !historyJobId) return;
+			if (historyStepInFlight) return;
+			if (myGen !== historyRunGen) return;
+
+			historyStepInFlight = true;
+			try {
+				const r = await ajax('POST', {
+					action: 'ett_job_step',
+					job_id: historyJobId,
+					_ajax_nonce: ETT_ADMIN.nonce
+				});
+
+				if (myGen !== historyRunGen) return;
+
+				if (r && r.success){
+					renderHistoryProgress(r.data.progress);
+					if (r.data.heartbeat_at) setHistoryHeartbeat(r.data.heartbeat_at);
+
+					if (['done', 'error', 'cancelled'].includes(r.data.status)){
+						stopHistoryJob();
+						refreshRunHistory();
+					}
+					return;
+				}
+
+				stopHistoryJob();
+			} catch (e){
+				if (myGen !== historyRunGen) return;
+				// transient error — keep going
+			} finally {
+				historyStepInFlight = false;
+			}
+		}
+
+		doHistoryStep();
+		historyStepTimer = setInterval(doHistoryStep, 500);
+	}
+
+	// ─────────────────────────────────────────────────────────────────────
 
 	function setHeartbeatVisible(show){
 		$('#ett-heartbeat').toggle(!!show);
@@ -313,8 +495,12 @@
 			});
 
 			if (!r || !r.success || !r.data){
-				esiOverall = 'Down';
-				setEsiStatus('bad', 'ESI: Down', (r && r.data && r.data.note) ? r.data.note : '');
+				// Only set Down if ESI was already considered Down or unknown — 
+				// a single failed check during a busy moment should not override a known good state
+				if (esiOverall === null || esiOverall === 'Down'){
+					esiOverall = 'Down';
+					setEsiStatus('bad', 'ESI: Down', (r && r.data && r.data.note) ? r.data.note : '');
+				}
 			} else {
 				esiOverall = r.data.overall || 'Down';
 				const note = r.data.note || '';
@@ -324,8 +510,11 @@
 				else setEsiStatus('bad', `ESI: ${esiOverall}`, note);
 			}
 		} catch (e){
-			esiOverall = 'Down';
-			setEsiStatus('bad', 'ESI: Down', (e && e.message) ? e.message : 'Request failed');
+			// Only set Down on repeated failures, not a single transient error
+			if (esiOverall === null || esiOverall === 'Down'){
+				esiOverall = 'Down';
+				setEsiStatus('bad', 'ESI: Down', (e && e.message) ? e.message : 'Request failed');
+			}
 		}
 
 		const runBtn = $('#ett-btn-run');
@@ -487,13 +676,18 @@
                                 if (st.data.status === 'done' && st.data.progress && st.data.progress.job_type === 'prices'){
                                     const completed = st.data.finished_at || ETT_ADMIN.last_price_run_completed_at;
                                     const tz = ETT_ADMIN.wp_timezone_string || 'UTC';
-            
+                        
                                     if (completed){
                                         ETT_ADMIN.last_price_run_completed_at = completed;
                                         $('#ett-last-price-run').text(`${completed} (${tz})`);
                                     }
+
+                                    const hJobId = (st.data.progress && st.data.progress.history_job_id) ? st.data.progress.history_job_id : null;
+                                    stopJob();
+                                    if (hJobId) startHistoryJob(hJobId);
+                                    return;
                                 }
-            
+                        
                                 if (st.data.status === 'done' && st.data.progress && st.data.progress.job_type === 'typeids'){
                                   const generated = st.data.progress?.details?.generated_typeids;
                                   if (generated !== null && generated !== undefined && !isNaN(Number(generated))){
@@ -557,7 +751,20 @@
                             }
                             flashGeneratedTypeids(generated);
                           }
-                        
+
+                          if (r.data.status === 'done' && r.data.progress && r.data.progress.job_type === 'prices'){
+                            const completed = r.data.progress.finished_at || ETT_ADMIN.last_price_run_completed_at;
+                            const tz = ETT_ADMIN.wp_timezone_string || 'UTC';
+                            if (completed){
+                              ETT_ADMIN.last_price_run_completed_at = completed;
+                              $('#ett-last-price-run').text(`${completed} (${tz})`);
+                            }
+                            const hJobId = (r.data.progress && r.data.progress.history_job_id) ? r.data.progress.history_job_id : null;
+                            stopJob();
+                            if (hJobId) startHistoryJob(hJobId);
+                            return;
+                          }
+
                           stopJob();
                         }
 
@@ -681,6 +888,14 @@
 			const prog = job.progress || {};
 			const driver = prog.driver || 'browser';
 
+			// If a history job is active on page load, attach to it directly
+			if ((job.job_type || prog.job_type) === 'history') {
+				$('#ett-history-progress').show();
+				renderHistoryProgress(prog);
+				startHistoryJob(job.job_id);
+				return;
+			}
+
             runGen++;
 			running = true;
 			terminalAlertShown = false;
@@ -755,16 +970,14 @@
 		setHeartbeatVisible(false);
 
         $('#ett-btn-cancel').prop('disabled', true);
-        
-        const $runBtn = $('#ett-btn-run');
-        if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
-        $runBtn.prop('disabled', false);
-        btnSetLabel($runBtn, runBtnLabel);
-        
-        const $genBtn = $('#ett-btn-generate');
-        if (genBtnLabel === null) genBtnLabel = btnGetLabel($genBtn);
-        $genBtn.prop('disabled', false);
-        btnSetLabel($genBtn, genBtnLabel);
+
+        // Run Prices button stays disabled until history job completes
+        if (!historyRunning) {
+            const $runBtn = $('#ett-btn-run');
+            if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
+            $runBtn.prop('disabled', false);
+            btnSetLabel($runBtn, runBtnLabel);
+        }
 
 		refreshRunHistory();
 		refreshNextRun();
@@ -772,6 +985,21 @@
 	}
 
     async function cancelJob(){
+    	// If history is running and prices is not, cancel the history job
+    	if (!running && historyRunning && historyJobId) {
+    		$('#ett-btn-cancel').prop('disabled', true).text('Cancelling...');
+    		try {
+    			await ajax('POST', {
+    				action: 'ett_job_cancel',
+    				job_id: historyJobId,
+    				_ajax_nonce: ETT_ADMIN.nonce
+    			});
+    		} catch (e) {}
+    		stopHistoryJob();
+    		$('#ett-history-phase').text('Cancelled.');
+    		return;
+    	}
+
     	if (!running || !jobId) return;
     	if (cancelling) return;
     
