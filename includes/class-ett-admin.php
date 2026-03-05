@@ -524,7 +524,7 @@ class ETT_Admin {
 				$stmt = $pdo->query(
 					"SELECT job_id, job_type, status, started_at, finished_at, heartbeat_at, last_error, progress_json
 					FROM ett_jobs
-					WHERE job_type = 'prices'
+					WHERE job_type IN ('prices','history')
 						AND status IN ('done','error','cancelled')
 					ORDER BY finished_at DESC
 					LIMIT 25"
@@ -1065,10 +1065,42 @@ class ETT_Admin {
 					<pre class="ett-json" id="ett-progress-json">{}</pre>
 
 					<div class="ett-warning ett-hidden" id="ett-stalled">
-						Heartbeat has not updated recently — job may be stalled (PHP timeout, network issue, or rate limiting).
-					</div>
+					Heartbeat has not updated recently — job may be stalled (PHP timeout, network issue, or rate limiting).
 				</div>
 			</div>
+
+			<div class="ett-progress ett-mt-10" id="ett-history-progress" style="display:none;">
+				<div class="ett-progress-head">
+					<div>
+						<div class="ett-title">History Fetch Progress</div>
+						<div class="ett-sub" id="ett-history-phase">Idle.</div>
+						<div class="ett-sub" id="ett-history-msg">—</div>
+					</div>
+
+					<div class="ett-status-stack">
+						<div class="ett-heartbeat" id="ett-history-heartbeat">
+							<span class="ett-dot"></span>
+							<span class="ett-hb-text">No heartbeat</span>
+						</div>
+					</div>
+				</div>
+
+				<div class="ett-kpis" style="grid-template-columns:repeat(5,1fr);">
+					<div class="ett-kpi"><div class="ett-k">Elapsed</div><div class="ett-v" id="ett-history-kpi-elapsed">—</div></div>
+					<div class="ett-kpi"><div class="ett-k">Hub</div><div class="ett-v" id="ett-history-kpi-hub">—</div></div>
+					<div class="ett-kpi"><div class="ett-k">Items Done</div><div class="ett-v" id="ett-history-kpi-done">—</div></div>
+					<div class="ett-kpi"><div class="ett-k">Items Total</div><div class="ett-v" id="ett-history-kpi-total">—</div></div>
+					<div class="ett-kpi"><div class="ett-k">Rows Written</div><div class="ett-v" id="ett-history-kpi-written">—</div></div>
+				</div>
+
+				<div style="margin-top:10px;background:#e2e4e7;border-radius:6px;height:10px;overflow:hidden;">
+					<div id="ett-history-bar" style="height:100%;background:#00a32a;width:0%;transition:width 0.3s;"></div>
+				</div>
+				<div style="text-align:right;font-size:12px;color:#646970;margin-top:3px;" id="ett-history-bar-pct">0%</div>
+
+				<pre class="ett-json" id="ett-history-progress-json">{}</pre>
+			</div>
+		</div>
 
 			<div class="ett-card">
 				<h2>Schedule</h2>
