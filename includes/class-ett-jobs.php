@@ -604,6 +604,10 @@ class ETT_Jobs {
 			return $progress;
 		}
 
+		if (($progress['phase'] ?? '') === 'adjusted'){
+			return self::step_adjusted_prices($pdo, $progress, $job_id);
+		}
+
 		if (($progress['phase'] ?? '') !== 'hub') return $progress;
 
 		$now = time();
@@ -615,29 +619,9 @@ class ETT_Jobs {
 
         $hub_key = $progress['hubs'][$progress['hub_index']] ?? null;
         if (!$hub_key) {
-        	$progress['phase'] = 'done';
-        
-        	// Include elapsed time (since job started_at) in completion message
-        	$elapsed_s = null;
-        	try {
-        		$stmt = $pdo->prepare("SELECT started_at FROM ett_jobs WHERE job_id=:id LIMIT 1");
-        		$stmt->execute([':id' => $job_id]);
-        		$started_at = (string)($stmt->fetchColumn() ?: '');
-        		if ($started_at !== '') {
-        			$dt0 = DateTime::createFromFormat('Y-m-d H:i:s', $started_at, wp_timezone());
-        			if ($dt0 instanceof DateTime) {
-        				$dt1 = new DateTime('now', wp_timezone());
-        				$elapsed_s = max(0, $dt1->getTimestamp() - $dt0->getTimestamp());
-        			}
-        		}
-        	} catch (Exception $e) {
-        		// ignore; fall back to message without timing
-        	}
-        
-        	$progress['last_msg'] = $elapsed_s !== null
-        		? ('All hubs complete (took ' . self::format_duration((int)$elapsed_s) . ')')
-        		: 'All hubs complete';
-        
+        	// All hub data fetched — move to adjusted prices phase before marking done.
+        	$progress['phase']    = 'adjusted';
+        	$progress['last_msg'] = 'Hub data complete. Fetching adjusted prices…';
         	return $progress;
         }
         
@@ -1009,18 +993,23 @@ class ETT_Jobs {
 		$job_id = self::uuid4();
 		$now = current_time('mysql');
 
+		// Base progress fields shared by all job types
 		$progress = [
 			'job_type' => $job_type,
-			'driver' => $driver,
-			'phase' => 'init',
+			'driver'   => $driver,
+			'phase'    => 'init',
 			'last_msg' => 'Queued',
-			'error' => null,
-			'current_hub' => null,
-			'page' => null,
-			'orders_seen' => 0,
-			'matched_orders' => 0,
+			'error'    => null,
 			'rows_written' => 0,
 		];
+
+		// Prices/typeids-specific fields — not relevant to history jobs
+		if ($job_type !== 'history') {
+			$progress['current_hub']    = null;
+			$progress['page']           = null;
+			$progress['orders_seen']    = 0;
+			$progress['matched_orders'] = 0;
+		}
 
 		$stmt = $pdo->prepare("
 			INSERT INTO ett_jobs (job_id, job_type, status, progress_json, heartbeat_at, started_at)
@@ -1113,7 +1102,10 @@ class ETT_Jobs {
 			}
 
 			self::heartbeat($pdo, $job_id, $progress);
-			wp_schedule_single_event(time() + 1, 'ett_ph_history_tick', [$job_id]);
+
+			$sleep_until = (int)($progress['sleep_until'] ?? 0);
+			$next_tick   = ($sleep_until > time()) ? $sleep_until : time() + 1;
+			wp_schedule_single_event($next_tick, 'ett_ph_history_tick', [$job_id]);
 
 		} catch (\Throwable $e) {
 			self::debug_log('[ETT] cron_history_tick error: ' . $e->getMessage());
@@ -1130,9 +1122,133 @@ class ETT_Jobs {
 		}
 	}
 
+	// ── Adjusted prices step ───────────────────────────────────────────────
+
+	/**
+	 * Fetch ESI /markets/prices/ (full list, no pagination), filter to our
+	 * selected type IDs, and upsert into ett_adjusted_prices.
+	 * Called as a phase of the prices job immediately after all hubs complete.
+	 */
+	private static function step_adjusted_prices(PDO $pdo, array $progress, string $job_id) : array {
+
+		$now = time();
+
+		// Respect any backoff that was set on a previous attempt of this phase.
+		if (!empty($progress['sleep_until']) && $now < (int)$progress['sleep_until']) {
+			$wait = (int)$progress['sleep_until'] - $now;
+			$progress['last_msg'] = "Adjusted prices: backoff active, waiting {$wait}s";
+			return $progress;
+		}
+
+		$progress['last_msg'] = 'Fetching adjusted prices from ESI…';
+
+		$esi = ETT_ESI::market_prices();
+
+		if (!empty($esi['rate_limited'])) {
+			$retry = max(1, (int)($esi['retry_after'] ?? 5));
+
+			$progress['rate_limited_seen'] = true;
+			$progress['warning_msg']       = 'Rate limiting was encountered during this run. The job will back off and continue, but if it is cancelled/interrupted the resulting dataset may be incomplete.';
+			$progress['sleep_until']       = time() + $retry;
+			$progress['last_msg']          = "Adjusted prices: ESI rate limited (HTTP {$esi['code']}), backing off {$retry}s";
+			return $progress;
+		}
+
+		if (empty($esi['ok'])) {
+			// Transient error — retry after a short backoff, same as hub phase.
+			$progress['warning_msg'] = 'A transient ESI error occurred fetching adjusted prices. The job will retry.';
+			$progress['sleep_until'] = time() + 5;
+			$progress['last_msg']    = 'Adjusted prices: ESI transient error (HTTP ' . (int)($esi['code'] ?? 0) . '), retrying in 5s';
+			return $progress;
+		}
+
+		// Clear any previous backoff now that the request succeeded.
+		$progress['sleep_until'] = 0;
+
+		$raw_prices = $esi['prices'] ?? [];
+
+		// Build a fast lookup of our selected type IDs.
+		$selected = [];
+		try {
+			$rows = $pdo->query('SELECT type_id FROM ett_selected_typeids ORDER BY type_id ASC')->fetchAll(PDO::FETCH_COLUMN);
+			foreach ($rows as $tid) {
+				$selected[(int)$tid] = true;
+			}
+		} catch (\Throwable $e) {
+			$progress['last_msg'] = 'Adjusted prices: failed to load selected typeIDs — ' . $e->getMessage();
+			$progress['phase']    = 'done';
+			return $progress;
+		}
+
+		// Filter ESI response to our selected type IDs only and build upsert params.
+		$now_mysql    = current_time('mysql');
+		$placeholders = [];
+		$params       = [];
+
+		foreach ($raw_prices as $row) {
+			$type_id = (int)($row['type_id'] ?? 0);
+			if ($type_id <= 0 || !isset($selected[$type_id])) continue;
+
+			$adj = isset($row['adjusted_price']) ? (float)$row['adjusted_price'] : null;
+			$avg = isset($row['average_price'])  ? (float)$row['average_price']  : null;
+
+			$placeholders[] = '(?,?,?,?)';
+			$params[]       = $type_id;
+			$params[]       = $adj;
+			$params[]       = $avg;
+			$params[]       = $now_mysql;
+		}
+
+		$written = 0;
+
+		if (!empty($placeholders)) {
+			$chunk_size = 500;
+			$total_rows = count($placeholders);
+
+			for ($offset = 0; $offset < $total_rows; $offset += $chunk_size) {
+				$chunk_ph     = array_slice($placeholders, $offset, $chunk_size);
+				$chunk_params = array_slice($params, $offset * 4, $chunk_size * 4);
+
+				// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+				$sql = 'INSERT INTO ett_adjusted_prices (type_id, adjusted_price, average_price, fetched_at) VALUES '
+				     . implode(',', $chunk_ph)
+				     . ' ON DUPLICATE KEY UPDATE adjusted_price = VALUES(adjusted_price), average_price = VALUES(average_price), fetched_at = VALUES(fetched_at)';
+
+				$pdo->prepare($sql)->execute($chunk_params);
+				$written += count($chunk_ph);
+			}
+		}
+
+		// Include elapsed time in completion message.
+		$elapsed_s = null;
+		try {
+			$stmt = $pdo->prepare('SELECT started_at FROM ett_jobs WHERE job_id=:id LIMIT 1');
+			$stmt->execute([':id' => $job_id]);
+			$started_at = (string)($stmt->fetchColumn() ?: '');
+			if ($started_at !== '') {
+				$dt0 = DateTime::createFromFormat('Y-m-d H:i:s', $started_at, wp_timezone());
+				if ($dt0 instanceof DateTime) {
+					$elapsed_s = max(0, (new DateTime('now', wp_timezone()))->getTimestamp() - $dt0->getTimestamp());
+				}
+			}
+		} catch (\Throwable $e) {
+			// Non-fatal — fall back to message without timing.
+		}
+
+		$progress['phase']        = 'done';
+		$progress['rows_written'] = ($progress['rows_written'] ?? 0) + $written;
+		$progress['last_msg']     = $elapsed_s !== null
+			? sprintf('All hubs and adjusted prices complete — %d adjusted prices written (took %s)', $written, self::format_duration((int)$elapsed_s))
+			: sprintf('All hubs and adjusted prices complete — %d adjusted prices written', $written);
+
+		return $progress;
+	}
+
 	// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared
 	private static function step_history(PDO $pdo, array $progress) : array {
-		$batch_size = 50;
+		$batch_size = (int) get_option(ETT_Admin::OPT_HISTORY_BATCH_SIZE, 15);
+		if ($batch_size < 1)  $batch_size = 1;
+		if ($batch_size > 50) $batch_size = 50;
 
 		// ── Init phase: resolve regions + count type_ids ──────────────────
 		if (($progress['phase'] ?? 'init') === 'init') {
@@ -1293,6 +1409,13 @@ class ETT_Jobs {
 		$total = (int) ($progress['items_total'] ?? 1);
 		$pct   = $total > 0 ? round($done / $total * 100, 1) : 0.0;
 		$progress['last_msg'] = "Hub {$hub_key}: {$done}/{$total} ({$pct}%)";
+
+		// Rate limiting was previously encountered but the batch completed successfully.
+		// Strip the "Backing off and retrying" suffix — the persistent "rate limiting
+		// encountered" note remains, but the action clause is no longer accurate.
+		if (!empty($progress['rate_limited_seen'])) {
+			$progress['warning_msg'] = 'Rate limiting encountered during history fetch.';
+		}
 
 		// Check if this region is now exhausted
 		if ($type_idx >= $type_count) {
