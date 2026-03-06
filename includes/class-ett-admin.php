@@ -33,6 +33,8 @@ class ETT_Admin {
 	const OPT_BATCH_MAX_PAGES   = 'ett_batch_max_pages';
 	const OPT_BATCH_MAX_SECONDS = 'ett_batch_max_seconds';
 
+	const OPT_HISTORY_BATCH_SIZE = 'ett_history_batch_size';
+
 	public static function hubs() : array{
 		return [
 			'jita' => [
@@ -505,6 +507,7 @@ class ETT_Admin {
 
 		$batch_max_pages   = (int)get_option(self::OPT_BATCH_MAX_PAGES, 5);
 		$batch_max_seconds = (int)get_option(self::OPT_BATCH_MAX_SECONDS, 10);
+		$history_batch_size = (int)get_option(self::OPT_HISTORY_BATCH_SIZE, 15);
 
 		if ($batch_max_pages < 1) $batch_max_pages = 1;
 		if ($batch_max_pages > 50) $batch_max_pages = 50;
@@ -995,6 +998,19 @@ class ETT_Admin {
 							<p class="description">Time budget per tick/call. Keep conservative on shared hosting (8–12s).</p>
 						</div>
 
+						<div class="ett-row">
+							<label>History fetch concurrency</label>
+							<input
+								type="number"
+								class="ett-sched-input"
+								name="history_batch_size"
+								min="1"
+								max="50"
+								value="<?php echo esc_attr($history_batch_size); ?>"
+							/>
+							<p class="description">Number of parallel ESI requests per history step (1–50). Lower this if you are hitting rate limits during the history fetch. Default: 15.</p>
+						</div>
+
 						<p class="ett-mt-10">
 							<button type="submit" class="button button-secondary">Save performance settings</button>
 						</p>
@@ -1383,6 +1399,11 @@ class ETT_Admin {
     
     	update_option(self::OPT_BATCH_MAX_PAGES, $batch_max_pages, false);
     	update_option(self::OPT_BATCH_MAX_SECONDS, $batch_max_seconds, false);
+
+    	$history_batch_size = (int) wp_unslash($src['history_batch_size'] ?? 15);
+    	if ($history_batch_size < 1)  $history_batch_size = 1;
+    	if ($history_batch_size > 50) $history_batch_size = 50;
+    	update_option(self::OPT_HISTORY_BATCH_SIZE, $history_batch_size, false);
     
     	return [$batch_max_pages, $batch_max_seconds];
     }
