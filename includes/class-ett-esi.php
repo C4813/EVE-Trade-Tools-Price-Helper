@@ -139,6 +139,99 @@ class ETT_ESI {
 		return self::orders_page_common($resp);
 	}
 
+	/**
+	 * Fetch the full ESI adjusted/average price list.
+	 * Endpoint: GET /latest/markets/prices/
+	 * Returns every type_id CCP publishes; caller must filter to selected type IDs.
+	 *
+	 * @return array {
+	 *   bool   ok
+	 *   int    code
+	 *   array  prices      [ ['type_id'=>int, 'adjusted_price'=>float, 'average_price'=>float], … ]
+	 *   bool   rate_limited
+	 *   int    retry_after
+	 *   string note
+	 *   int|null remain
+	 *   int|null reset
+	 * }
+	 */
+	public static function market_prices() : array{
+		$url = self::BASE . '/markets/prices/?datasource=tranquility';
+
+		$resp = wp_remote_get($url, [
+			'timeout' => 30,
+			'headers' => [
+				'Accept'     => 'application/json',
+				'User-Agent' => 'WordPress/ETT-Price-Helper; ' . home_url('/'),
+			],
+		]);
+
+		if (is_wp_error($resp)){
+			return [
+				'ok'           => false,
+				'code'         => 0,
+				'prices'       => [],
+				'rate_limited' => false,
+				'retry_after'  => 5,
+				'note'         => $resp->get_error_message(),
+				'remain'       => null,
+				'reset'        => null,
+			];
+		}
+
+		$code = (int)wp_remote_retrieve_response_code($resp);
+		$hdrs = wp_remote_retrieve_headers($resp);
+
+		$remain = self::header_get($hdrs, 'x-esi-error-limit-remain');
+		$reset  = self::header_get($hdrs, 'x-esi-error-limit-reset');
+		$remain = ($remain === null) ? null : (int)$remain;
+		$reset  = ($reset  === null) ? null : (int)$reset;
+
+		if ($code === 420 || $code === 429){
+			$ra          = self::header_get($hdrs, 'retry-after');
+			$retry_after = ($ra !== null && is_numeric($ra)) ? (int)$ra : null;
+			if ($retry_after === null && $reset !== null && $reset > 0) $retry_after = $reset;
+			if ($retry_after === null) $retry_after = 5;
+
+			return [
+				'ok'           => false,
+				'code'         => $code,
+				'prices'       => [],
+				'rate_limited' => true,
+				'retry_after'  => $retry_after,
+				'note'         => substr((string)wp_remote_retrieve_body($resp), 0, 200),
+				'remain'       => $remain,
+				'reset'        => $reset,
+			];
+		}
+
+		if ($code < 200 || $code >= 300){
+			return [
+				'ok'           => false,
+				'code'         => $code,
+				'prices'       => [],
+				'rate_limited' => false,
+				'retry_after'  => 5,
+				'note'         => substr((string)wp_remote_retrieve_body($resp), 0, 200),
+				'remain'       => $remain,
+				'reset'        => $reset,
+			];
+		}
+
+		$data = json_decode(wp_remote_retrieve_body($resp), true);
+
+		return [
+			'ok'           => true,
+			'code'         => $code,
+			'prices'       => is_array($data) ? $data : [],
+			'rate_limited' => false,
+			'retry_after'  => null,
+			'note'         => null,
+			'remain'       => $remain,
+			'reset'        => $reset,
+		];
+	}
+
 	public static function meta_status() : array{
 		$compat = gmdate('Y-m-d', time() - (11 * 3600));
 		$url = "https://esi.evetech.net/meta/status/?datasource=tranquility&compatibility_date={$compat}";
