@@ -26,6 +26,21 @@ class ETT_Admin {
 
 	const OPT_LAST_IMPORT = 'ett_fuzzwork_last_import_meta';
 
+	/** @var array<array{slug:string,label:string,callback:callable}> */
+	private static array $tabs = [];
+
+	/**
+	 * Register a tab on the master EVE Trade Tools admin page.
+	 * Call this from a hook on 'ett_admin_tabs'.
+	 *
+	 * @param string   $slug     Unique tab identifier, e.g. 'reprocess-trading'
+	 * @param string   $label    Tab label shown in the nav
+	 * @param callable $callback Renders the tab content
+	 */
+	public static function register_tab(string $slug, string $label, callable $callback): void {
+		self::$tabs[] = ['slug' => $slug, 'label' => $label, 'callback' => $callback];
+	}
+
 	const OPT_LAST_PRICE_RUN   = 'ett_last_price_run_completed_at';
 	const OPT_SCHED_START_TIME = 'ett_sched_start_time';
 	const OPT_SCHED_FREQ_HOURS = 'ett_sched_freq_hours';
@@ -116,7 +131,9 @@ class ETT_Admin {
 		add_action('admin_post_ett_save_sso', [__CLASS__, 'handle_save_sso']);
 		add_action('wp_ajax_ett_save_sso_ajax', [__CLASS__, 'ajax_save_sso']);
 		add_action('admin_post_ett_sso_start', [__CLASS__, 'handle_sso_start']);
-		add_action('admin_post_ett_sso_callback', [__CLASS__, 'handle_sso_callback']);
+		add_action('admin_post_ett_sso_callback',        [__CLASS__, 'handle_sso_callback']);
+		add_action('admin_post_ett_eve_callback',         [__CLASS__, 'handle_eve_callback']);
+		add_action('admin_post_nopriv_ett_eve_callback',  [__CLASS__, 'handle_eve_callback']);
 		add_action('admin_post_ett_sso_disconnect', [__CLASS__, 'handle_sso_disconnect']);
 		add_action('wp_ajax_ett_sso_refresh_structures', [__CLASS__, 'ajax_sso_refresh_structures']);
 		add_action('admin_post_ett_import_fuzzwork', [__CLASS__, 'handle_import_fuzzwork']);
@@ -362,13 +379,16 @@ class ETT_Admin {
 
 	public static function menu(){
 		add_menu_page(
-			'ETT Price Helper',
-			'ETT Prices',
+			'EVE Trade Tools',
+			'EVE Trade Tools',
 			self::CAP,
 			self::SLUG,
 			[__CLASS__, 'render'],
 			'dashicons-database'
 		);
+
+		// Allow other plugins to register tabs
+		do_action('ett_admin_tabs');
 	}
 
 	public static function maybe_disable_cache_for_page(){
@@ -563,10 +583,27 @@ class ETT_Admin {
 		}
 
 		$typeid_display = ($typeid_count !== null) ? number_format((int)$typeid_count) : '—';
+			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- tab routing param, not an action
+			$active_tab = sanitize_key(wp_unslash($_GET['tab'] ?? 'price-helper'));
 		?>
 		<div class="wrap ett-wrap">
-			<h1>ETT Price Helper</h1>
+			<h1>EVE Trade Tools</h1>
 
+			<nav class="nav-tab-wrapper ett-tab-nav">
+				<a href="<?php echo esc_url(add_query_arg(['page' => self::SLUG, 'tab' => 'price-helper'], admin_url('admin.php'))); ?>"
+				   class="nav-tab<?php echo $active_tab === 'price-helper' ? ' nav-tab-active' : ''; ?>">
+					Price Helper
+				</a>
+				<?php foreach (self::$tabs as $tab): ?>
+				<a href="<?php echo esc_url(add_query_arg(['page' => self::SLUG, 'tab' => $tab['slug']], admin_url('admin.php'))); ?>"
+				   class="nav-tab<?php echo $active_tab === $tab['slug'] ? ' nav-tab-active' : ''; ?>">
+					<?php echo esc_html($tab['label']); ?>
+				</a>
+				<?php endforeach; ?>
+			</nav>
+
+			<?php if ($active_tab === 'price-helper'): ?>
+			<div class="ett-tab-panel">
 			<div class="ett-grid">
 				<div class="ett-card">
 					<h2>External Database</h2>
@@ -705,16 +742,23 @@ class ETT_Admin {
 							<li>Create a new application.</li>
 							<li>Set the application <strong>Callback URL</strong> to the value shown below (exact match required).</li>
 							<div class="ett-row">
-								<label>Callback URL</label>
-								<input type="text" readonly value="<?php echo esc_attr(admin_url('admin-post.php?action=ett_sso_callback')); ?>"/>
+								<label>Callback URL <span class="ett-muted">(universal &mdash; handles all ETT plugins)</span></label>
+								<input type="text" readonly value="<?php echo esc_attr(self::unified_callback_url()); ?>" onclick="this.select();"/>
 							</div>
-							<li>Set the application <strong>Scopes</strong> to the following (required by this plugin):</li>
+							<li>Set the application <strong>Scopes</strong> to the following:</li>
 						</ol>
 
+						<p class="description ett-mt-8"><strong>Required by ETT Price Helper:</strong></p>
 						<ul class="ett-list-disc ett-tight">
 							<li><code>esi-universe.read_structures.v1</code></li>
 							<li><code>esi-markets.structure_markets.v1</code></li>
 							<li><code>esi-search.search_structures.v1</code></li>
+						</ul>
+
+						<p class="description ett-mt-8"><strong>Required by ETT Reprocess Trading</strong> (if installed):</p>
+						<ul class="ett-list-disc ett-tight">
+							<li><code>esi-skills.read_skills.v1</code></li>
+							<li><code>esi-characters.read_standings.v1</code></li>
 						</ul>
 
 						<p class="description ett-mt-8">
@@ -1225,7 +1269,18 @@ class ETT_Admin {
 					<?php submit_button('Cancel Schedule', 'secondary', 'cancel_schedule', false); ?>
 				</form>
 			</div>
-		</div>
+			</div><!-- /.ett-tab-panel -->
+			<?php endif; ?>
+
+			<?php foreach (self::$tabs as $tab): ?>
+			<?php if ($active_tab === $tab['slug']): ?>
+			<div class="ett-tab-panel">
+				<?php call_user_func($tab['callback']); ?>
+			</div><!-- /.ett-tab-panel -->
+			<?php endif; ?>
+			<?php endforeach; ?>
+
+		</div><!-- /.wrap -->
 		<?php
 	}
 
@@ -1542,8 +1597,16 @@ class ETT_Admin {
     	}
     }
 
+/**
+	 * The single unified EVE SSO callback URL for all ETT plugins.
+	 * Register this URL in your EVE developer application.
+	 */
+	public static function unified_callback_url() : string {
+		return admin_url('admin-post.php?action=ett_eve_callback');
+	}
+
 	private static function sso_callback_url() : string{
-		return admin_url('admin-post.php?action=ett_sso_callback');
+		return self::unified_callback_url();
 	}
 
 	private static function sso_scopes() : string{
@@ -1731,6 +1794,39 @@ class ETT_Admin {
 
 		wp_safe_redirect($url);
 		exit;
+	}
+
+/**
+	 * Unified EVE SSO callback dispatcher.
+	 * Routes to the correct handler based on which plugin initiated the OAuth flow,
+	 * identified by the state transient prefix set at auth initiation time.
+	 */
+	public static function handle_eve_callback() : void {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- OAuth callback
+		$state = isset($_GET['state']) ? sanitize_text_field(wp_unslash($_GET['state'])) : '';
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- OAuth callback
+		$code  = isset($_GET['code'])  ? sanitize_text_field(wp_unslash($_GET['code']))  : '';
+
+		if (empty($state) || empty($code)) {
+			wp_die('Invalid EVE SSO callback: missing state or code.');
+		}
+
+		// Price Helper admin flow: transient is set by handle_sso_start()
+		if (get_transient('ett_sso_state_' . $state)) {
+			self::handle_sso_callback();
+			return;
+		}
+
+		// Reprocess Trading per-user flow: transient is set by ETT_RT_OAuth::connect_button()
+		if (get_transient('ett_rt_state_' . $state)) {
+			if (!class_exists('ETT_RT_OAuth')) {
+				wp_die('ETT Reprocess Trading is not active.');
+			}
+			ETT_RT_OAuth::handle_callback();
+			return;
+		}
+
+		wp_die('Invalid or expired EVE SSO state.');
 	}
 
 	public static function handle_sso_callback(){
