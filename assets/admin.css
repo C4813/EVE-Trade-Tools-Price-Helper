@@ -322,3 +322,12 @@
 
 .ett-history-wrap{ margin-top:10px; }
 .ett-history-table{ margin-top:8px; }
+
+/* ── Master tab nav ──────────────────────────────────────────────────────── */
+.ett-tab-nav {
+    margin-bottom: 16px;
+}
+
+.ett-tab-panel {
+    /* panels are shown/hidden by PHP conditional, no JS needed */
+}
