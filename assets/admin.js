@@ -148,12 +148,21 @@
 		btnSetLabel($runBtn, runBtnLabel);
 	}
 
-	function startHistoryJob(jobId){
+	function startHistoryJob(jobId, startedAt){
 		if (historyRunning) return;
 
 		historyJobId       = jobId;
 		historyRunning     = true;
-		historyStartedAtMs = Date.now();
+
+		// Use the job's actual DB start time if provided (e.g. on page refresh / re-attach)
+		// so the elapsed ticker counts from when the job really began, not from page load.
+		if (startedAt) {
+			const d = parseWpMysql(startedAt);
+			historyStartedAtMs = d ? d.getTime() : Date.now();
+		} else {
+			historyStartedAtMs = Date.now();
+		}
+
 		historyRunGen++;
 
 		$('#ett-history-progress').show();
@@ -397,6 +406,7 @@
 		if (phase === 'queued') phaseText = 'Queued';
 		else if (phase === 'init') phaseText = (jobType === 'prices') ? 'Starting price run…' : 'Starting…';
 		else if (phase === 'hub') phaseText = 'Fetching market data…';
+		else if (phase === 'adjusted') phaseText = 'Fetching adjusted prices…';
 		else if (phase === 'done') phaseText = 'Completed successfully.';
 		else if (phase === 'cancelled') phaseText = 'Cancelled.';
 		else if (phase === 'error') phaseText = 'Error.';
@@ -526,7 +536,7 @@
 			return;
 		}
 
-		runBtn.prop('disabled', !!running);
+		runBtn.prop('disabled', !!running || !!historyRunning);
 		runBtn.text(runBtnLabel);
 	}
 
@@ -683,7 +693,7 @@
                                     }
 
                                     const hJobId = (st.data.progress && st.data.progress.history_job_id) ? st.data.progress.history_job_id : null;
-                                    stopJob();
+                                    stopJob(!!hJobId);
                                     if (hJobId) startHistoryJob(hJobId);
                                     return;
                                 }
@@ -760,7 +770,7 @@
                               $('#ett-last-price-run').text(`${completed} (${tz})`);
                             }
                             const hJobId = (r.data.progress && r.data.progress.history_job_id) ? r.data.progress.history_job_id : null;
-                            stopJob();
+                            stopJob(!!hJobId);
                             if (hJobId) startHistoryJob(hJobId);
                             return;
                           }
@@ -820,6 +830,18 @@
 
         $('#ett-btn-cancel').prop('disabled', false);
         
+        // When starting a price run, collapse the history section if it is open
+        // so stale "Completed" state from a previous run is not left visible.
+        if (jobType === 'prices'){
+            const details = document.getElementById('ett-history-details');
+            if (details && details.open){
+                details.open = false;
+                stopHistoryAutoRefresh();
+            }
+            // Also hide the history fetch progress panel (separate from the details element)
+            $('#ett-history-progress').hide();
+        }
+
         // Disable only the button that started the job
         if (jobType === 'prices'){
           const $runBtn = $('#ett-btn-run');
@@ -892,7 +914,9 @@
 			if ((job.job_type || prog.job_type) === 'history') {
 				$('#ett-history-progress').show();
 				renderHistoryProgress(prog);
-				startHistoryJob(job.job_id);
+				// Pass started_at so elapsed time counts from when the job actually began,
+				// not from when this page was loaded.
+				startHistoryJob(job.job_id, job.started_at || null);
 				return;
 			}
 
@@ -904,6 +928,10 @@
 
 			$('#ett-btn-cancel').prop('disabled', false);
 			$('#ett-btn-run').prop('disabled', true);
+
+			// A prices (or other) job is already running — hide any stale history progress
+			// panel that may have been left visible from a previous run.
+			$('#ett-history-progress').hide();
 
 			jobId = job.job_id;
 
@@ -952,7 +980,7 @@
 		}, 5000);
 	}
 
-    function stopJob(){
+    function stopJob(keepRunBtnDisabled = false){
     	runGen++;
     	running = false;
     	jobId = null;
@@ -971,8 +999,10 @@
 
         $('#ett-btn-cancel').prop('disabled', true);
 
-        // Run Prices button stays disabled until history job completes
-        if (!historyRunning) {
+        // Run Prices button stays disabled until history job completes.
+        // keepRunBtnDisabled is passed as true when a history job is about to start
+        // immediately after this call, so historyRunning hasn't been set to true yet.
+        if (!historyRunning && !keepRunBtnDisabled) {
             const $runBtn = $('#ett-btn-run');
             if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
             $runBtn.prop('disabled', false);
