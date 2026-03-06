@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.1.0
+Stable tag: 1.4.0
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -34,7 +34,7 @@ The plugin does not expose frontend functionality and does not modify the WordPr
 
 1. Upload the plugin folder to `/wp-content/plugins/`.
 2. Activate the plugin through the WordPress admin.
-3. Navigate to **WP Admin → ETT Prices**.
+3. Navigate to **WP Admin → EVE Trade Tools**.
 4. Configure your external database connection.
 5. Run the Fuzzwork import to populate required reference data.
 6. Configure hubs/structures and run price pulls manually or via schedule.
@@ -52,15 +52,45 @@ Yes. Scheduled runs use WordPress cron. For production reliability, a real syste
 
 == Changelog ==
 
+= 1.4.0 =
+* Renamed admin menu entry from "ETT Prices" to "EVE Trade Tools".
+* Introduced a master tabbed admin page; existing Price Helper settings are now presented under a "Price Helper" tab.
+* Added tab registration API (`ETT_Admin::register_tab()` / `ett_admin_tabs` action) allowing other ETT plugins to add tabs to the shared admin page without modifying this plugin.
+* Introduced a unified EVE SSO callback URL (`?action=ett_eve_callback`) that handles OAuth returns for all ETT plugins via a state-based dispatcher, replacing the previous plugin-specific callback.
+* Added `ETT_Admin::unified_callback_url()` public method for consistent URL generation across plugins.
+* Updated the developer app setup instructions: callback URL field labelled as "universal — handles all ETT plugins"; required scopes split into separate labelled groups for ETT Price Helper and ETT Reprocess Trading (if installed).
+* Legacy callback action (`ett_sso_callback`) retained for backwards compatibility.
+
+= 1.3.0 =
+* The prices job now fetches CCP's universe-wide adjusted and average price data from ESI immediately after all hub fetches complete, written to a new `ett_adjusted_prices` table.
+* New job phase `adjusted` runs between the hub phase and job completion.
+* Fetches `GET /markets/prices/` and filters to selected type IDs before writing.
+* Full rate-limit and transient-error handling with backoff/retry, consistent with the hub phase.
+* Elapsed time in the completion message now covers the full prices + adjusted run.
+* New database table `ett_adjusted_prices` — created automatically by `ensure_schema()`, no manual migration required.
+* The history fetch concurrency (previously hardcoded at 50 parallel ESI requests per step) is now configurable under Advanced performance settings. New option: History fetch concurrency — range 1–50, default 15. Reducing this value is the recommended fix if you encounter rate limiting during the history phase.
+* Fixed: history cron tick ignored `sleep_until` after a 429 — when the history job was rate-limited during a cron run, the next tick was always scheduled 1 second later instead of waiting out the backoff window.
+* Fixed: Run Prices button briefly re-enabled between prices finishing and history starting — a race condition in `stopJob()` allowed the button to become clickable during the transition; it now stays disabled for the full combined run.
+* Fixed: stale history progress panel left visible on new price run — starting a fresh prices run now clears any previously completed history progress panel.
+* Fixed: history job elapsed timer reset on page refresh — if the page was reloaded while a history job was in progress, the elapsed timer restarted from zero; it now anchors to the job's `started_at` timestamp from the database.
+* Fixed: history job progress blob included prices-only fields — `create_job()` no longer adds `current_hub`, `page`, `orders_seen`, and `matched_orders` to the initial progress JSON for history jobs.
+* Fixed: rate-limit warning retained stale "Backing off and retrying" suffix after recovery — once a rate-limited history batch completed successfully, the warning is now updated to remove the action clause.
+
+= 1.2.0 =
+* Market history fetching — after every price run (manual or scheduled), a history fetch job now runs automatically, pulling 30-day rolling average daily volume per item from the ESI market history endpoint for all selected trade hubs.
+* Parallel ESI requests — history fetching uses `curl_multi` to fire 50 requests simultaneously, keeping total fetch time well under 10 minutes for typical type ID lists.
+* New `ett_market_history` table storing `hub_key`, `type_id`, `avg_daily_volume`, and `fetched_at`.
+* History Fetch Progress UI — new progress section in the Actions card showing phase, hub, items done/total, rows written, elapsed time, heartbeat indicator, progress bar, and debug JSON box.
+* Rate limiting detection — 429 responses during history fetch trigger a 60-second backoff and surface a warning in the UI and debug box, matching the behaviour of the prices job.
+* Non-200 error tracking — non-429 ESI errors during history fetch are counted and logged to the warnings array in progress JSON.
+* Job history table now shows both `prices` and `history` type jobs.
+* Fixed: Run Prices button remains disabled until the history fetch completes, not just until the prices job finishes.
+* Fixed: Cancel button re-enables as "Cancel History" during the history fetch phase and correctly cancels the history job.
+* Fixed: ESI health indicator no longer flips to red on a single transient failed status check — only a previously unknown or already-down state will show Down on a failed check.
+
 = 1.1.0 =
-* Added import of invTypeMaterials from Fuzzwork
-* Renamed external database tables to match Fuzzwork source file names exactly:
-  - ett_invMarketGroups
-  - ett_invTypes
-  - ett_invMetaGroups
-  - ett_invMetaTypes
-  - ett_industryActivityProducts
-  - ett_invTypeMaterials
+* Added import of `invTypeMaterials` from Fuzzwork.
+* Renamed external database tables to match Fuzzwork source file names exactly: `ett_invMarketGroups`, `ett_invTypes`, `ett_invMetaGroups`, `ett_invMetaTypes`, `ett_industryActivityProducts`, `ett_invTypeMaterials`.
 * Updated import routines to target renamed tables.
 * Updated schema creation logic to align with new table naming.
 * Updated admin import reporting to reflect new table names.
@@ -74,8 +104,17 @@ Yes. Scheduled runs use WordPress cron. For production reliability, a real syste
 
 == Upgrade Notice ==
 
+= 1.4.0 =
+The admin menu entry has been renamed to "EVE Trade Tools". Settings are unchanged and no database migration is required.
+
+= 1.3.0 =
+New `ett_adjusted_prices` table created automatically on first load via `ensure_schema()`. No manual migration required. Safe to upgrade in place.
+
+= 1.2.0 =
+New `ett_market_history` table created automatically on first load via `ensure_schema()`. No manual migration required. Safe to upgrade in place.
+
 = 1.1.0 =
-Schema update: external database table names were aligned with Fuzzwork source file names. If upgrading from 1.0.x, ensure `ensure_schema()` runs or re-run the Fuzzwork import to initialize the renamed tables.
+Schema update: external database table names were aligned with Fuzzwork source file names. If upgrading from 1.0.x, ensure `ensure_schema()` runs or re-run the Fuzzwork import to initialise the renamed tables.
 
 = 1.0.1 =
 Maintenance release improving admin UI stability and internal structure. No database changes.
