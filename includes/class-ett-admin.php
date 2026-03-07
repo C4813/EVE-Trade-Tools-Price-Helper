@@ -284,6 +284,17 @@ class ETT_Admin {
     	]);
     }
 
+    private static function format_next_run_txt(int $ts, string $tz) : string {
+    	if ($ts <= 0) return 'Not scheduled';
+    	try {
+    		$dt = new DateTime('@' . $ts);
+    		$dt->setTimezone(wp_timezone());
+    		return $dt->format('Y-m-d H:i:s') . " ({$tz})";
+    	} catch (Exception $e) {
+    		return gmdate('Y-m-d H:i:s', $ts) . " ({$tz})";
+    	}
+    }
+
     public static function ajax_save_schedule(){
     	if (!current_user_can(self::CAP)){
     		wp_send_json_error('Insufficient permissions', 403);
@@ -295,19 +306,8 @@ class ETT_Admin {
     	ETT_Jobs::reschedule_prices_start();
     
     	$tz = wp_timezone_string();
-    	$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
-    	$next_ts  = $next_ts > 0 ? $next_ts : false;
-    	$next_txt = 'Not scheduled';
-    
-    	if ($next_ts){
-    		try {
-    			$dt = new DateTime('@' . (int)$next_ts);
-    			$dt->setTimezone(wp_timezone());
-    			$next_txt = $dt->format('Y-m-d H:i:s') . " ({$tz})";
-    		} catch (Exception $e){
-    			$next_txt = gmdate('Y-m-d H:i:s', (int)$next_ts) . " ({$tz})";
-    		}
-    	}
+		$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
+    	$next_txt = self::format_next_run_txt((int)$next_ts, $tz);
     
     	wp_send_json_success([
     		'saved'    => true,
@@ -336,19 +336,8 @@ class ETT_Admin {
     	check_ajax_referer('ett_admin');
     
     	$tz = wp_timezone_string();
-    	$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
-    	$next_ts  = $next_ts > 0 ? $next_ts : false;
-    	$next_txt = 'Not scheduled';
-    
-    	if ($next_ts){
-    		try {
-    			$dt = new DateTime('@' . (int)$next_ts);
-    			$dt->setTimezone(wp_timezone());
-    			$next_txt = $dt->format('Y-m-d H:i:s') . " ({$tz})";
-    		} catch (Exception $e){
-    			$next_txt = gmdate('Y-m-d H:i:s', (int)$next_ts) . " ({$tz})";
-    		}
-    	}
+		$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
+    	$next_txt = self::format_next_run_txt((int)$next_ts, $tz);
     
     	wp_send_json_success([
     		'next_txt' => $next_txt,
@@ -435,12 +424,12 @@ class ETT_Admin {
 		$tz   = wp_timezone_string();
 		$tz   = $tz ? $tz : 'UTC';
 
-		$access = self::decrypt_secret(
+		$access = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN, ''),
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN . '_iv', ''),
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN . '_mac', '')
 		);
-		$refresh = self::decrypt_secret(
+		$refresh = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN, ''),
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN . '_iv', ''),
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN . '_mac', '')
@@ -483,19 +472,19 @@ class ETT_Admin {
 		$tertiary_structures  = get_option(self::OPT_TERTIARY_STRUCTURES, []);
 
 		$client_id = get_option(self::OPT_SSO_CLIENT_ID, '');
-		$client_secret = self::decrypt_secret(
+		$client_secret = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET, ''),
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET . '_iv', ''),
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET . '_mac', '')
 		);
 
-		$access = self::decrypt_secret(
+		$access = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN, ''),
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN . '_iv', ''),
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN . '_mac', '')
 		);
 
-		$refresh = self::decrypt_secret(
+		$refresh = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN, ''),
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN . '_iv', ''),
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN . '_mac', '')
@@ -777,7 +766,7 @@ class ETT_Admin {
 
 						<div class="ett-row">
 							<label>Client Secret</label>
-							<input type="password" name="ett_sso_client_secret" value="<?php echo esc_attr($client_secret); ?>" placeholder="SSO application Secret Key"/>
+							<input type="password" name="ett_sso_client_secret" value="" placeholder="<?php echo $client_secret !== '' ? '(saved — leave blank to keep)' : 'SSO application Secret Key'; ?>"/>
 						</div>
 
 						<?php submit_button('Save SSO Settings', 'secondary', 'submit', false); ?>
@@ -1167,19 +1156,8 @@ class ETT_Admin {
 				<p>Automatic runs use the site timezone: <strong><?php echo esc_html($tz); ?></strong></p>
 
 				<?php
-				$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
-				$next_ts  = $next_ts > 0 ? $next_ts : false;
-				$next_txt = 'Not scheduled';
-
-				if ($next_ts){
-					try {
-						$dt = new DateTime('@' . (int)$next_ts);
-						$dt->setTimezone(wp_timezone());
-						$next_txt = $dt->format('Y-m-d H:i:s') . " ({$tz})";
-					} catch (Exception $e){
-						$next_txt = gmdate('Y-m-d H:i:s', (int)$next_ts) . " ({$tz})";
-					}
-				}
+		$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
+    	$next_txt = self::format_next_run_txt((int)$next_ts, $tz);
 				?>
 
                 <p><strong>Next scheduled run:</strong> <span id="ett-next-run"><?php echo esc_html($next_txt); ?></span></p>
@@ -1232,7 +1210,7 @@ class ETT_Admin {
 							<?php elseif ($job_history_err): ?>
 								<p class="description">Unable to load history: <?php echo esc_html($job_history_err); ?></p>
 							<?php else: ?>
-								<table class="widefat striped ett-history-table"
+								<table class="widefat striped ett-history-table">
 									<thead>
 										<tr>
 											<th>Started</th>
@@ -1524,9 +1502,7 @@ class ETT_Admin {
 		try {
             $t0 = microtime(true);
             $meta = ETT_Fuzzwork::import_all($pdo);
-            $elapsed_s = microtime(true) - $t0; // keep if you want for debug, but don't store/display
-            
-            // Ensure old installs can't keep showing it if you ever re-add display logic later
+            // Ensure old installs can't keep showing stale elapsed_s if re-added later
             unset($meta['elapsed_s']);
             
             update_option(self::OPT_LAST_IMPORT, $meta, false);
@@ -1574,8 +1550,6 @@ class ETT_Admin {
     	try {
             $t0 = microtime(true);
             $meta = ETT_Fuzzwork::import_all($pdo);
-            $elapsed_s = microtime(true) - $t0; // optional local debug only
-            
             unset($meta['elapsed_s']);
             update_option(self::OPT_LAST_IMPORT, $meta, false);
             
@@ -1605,9 +1579,6 @@ class ETT_Admin {
 		return admin_url('admin-post.php?action=ett_eve_callback');
 	}
 
-	private static function sso_callback_url() : string{
-		return self::unified_callback_url();
-	}
 
 	private static function sso_scopes() : string{
 		return 'esi-universe.read_structures.v1 esi-markets.structure_markets.v1 esi-search.search_structures.v1';
@@ -1620,6 +1591,11 @@ class ETT_Admin {
 	}
 
 	private static function jwt_claims($jwt) : array{
+		// Note: the JWT signature is intentionally not verified here. The token
+		// was received directly from EVE SSO over HTTPS in exchange for an auth
+		// code we initiated, so it cannot have been tampered with in transit.
+		// The claims (character name/ID) are used only for display, not for
+		// access control decisions.
 		$parts = explode('.', (string)$jwt);
 		if (count($parts) < 2) return [];
 		$payload = self::b64url_decode($parts[1]);
@@ -1627,17 +1603,10 @@ class ETT_Admin {
 		return is_array($json) ? $json : [];
 	}
 
-    private static function encrypt_secret(string $plaintext) : array{
-    	return ETT_Crypto::encrypt_triplet($plaintext);
-    }
-
-    private static function decrypt_secret(string $ciphertext, string $iv_b64, string $mac_b64) : string{
-        return ETT_Crypto::decrypt_triplet($ciphertext, $iv_b64, $mac_b64);
-    }
 
 	private static function sso_token_request(array $body){
 		$client_id = get_option(self::OPT_SSO_CLIENT_ID, '');
-		$client_secret = self::decrypt_secret(
+		$client_secret = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET, ''),
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET . '_iv', ''),
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET . '_mac', '')
@@ -1649,7 +1618,7 @@ class ETT_Admin {
        
         // EVE SSO commonly expects redirect_uri on auth-code exchange
         if (($body['grant_type'] ?? '') === 'authorization_code') {
-        	$body['redirect_uri'] = self::sso_callback_url();
+        	$body['redirect_uri'] = self::unified_callback_url();
         }
 
 		$resp = wp_remote_post('https://login.eveonline.com/v2/oauth/token', [
@@ -1674,12 +1643,12 @@ class ETT_Admin {
 	}
 
 	private static function ensure_access_token() : array{
-		$access = self::decrypt_secret(
+		$access = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN, ''),
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN . '_iv', ''),
 			(string)get_option(self::OPT_SSO_ACCESS_TOKEN . '_mac', '')
 		);
-		$refresh = self::decrypt_secret(
+		$refresh = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN, ''),
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN . '_iv', ''),
 			(string)get_option(self::OPT_SSO_REFRESH_TOKEN . '_mac', '')
@@ -1701,13 +1670,13 @@ class ETT_Admin {
 
 		$tok = $r['data'];
 
-		$encA = self::encrypt_secret((string)$tok['access_token']);
+		$encA = ETT_Crypto::encrypt_triplet((string)$tok['access_token']);
 		update_option(self::OPT_SSO_ACCESS_TOKEN, $encA['ciphertext'], false);
 		update_option(self::OPT_SSO_ACCESS_TOKEN . '_iv', $encA['iv'], false);
 		update_option(self::OPT_SSO_ACCESS_TOKEN . '_mac', $encA['mac'], false);
 
 		if (!empty($tok['refresh_token'])){
-			$encR = self::encrypt_secret((string)$tok['refresh_token']);
+			$encR = ETT_Crypto::encrypt_triplet((string)$tok['refresh_token']);
 			update_option(self::OPT_SSO_REFRESH_TOKEN, $encR['ciphertext'], false);
 			update_option(self::OPT_SSO_REFRESH_TOKEN . '_iv', $encR['iv'], false);
 			update_option(self::OPT_SSO_REFRESH_TOKEN . '_mac', $encR['mac'], false);
@@ -1735,13 +1704,19 @@ class ETT_Admin {
     private static function save_sso_from_request(array $src) : void {
         $client_id     = isset($src['ett_sso_client_id']) ? trim((string) wp_unslash($src['ett_sso_client_id'])) : '';
         $client_secret = isset($src['ett_sso_client_secret']) ? trim((string) wp_unslash($src['ett_sso_client_secret'])) : '';
-    
+
         update_option(self::OPT_SSO_CLIENT_ID, $client_id);
-    
-        $enc = self::encrypt_secret($client_secret);
-        update_option(self::OPT_SSO_CLIENT_SECRET, $enc['ciphertext'], false);
-        update_option(self::OPT_SSO_CLIENT_SECRET . '_iv', $enc['iv'], false);
-        update_option(self::OPT_SSO_CLIENT_SECRET . '_mac', $enc['mac'], false);
+
+        // Only overwrite the stored secret when a new value is explicitly provided.
+        // Leaving the field blank preserves the existing secret — same pattern as
+        // the DB password field. The form never pre-fills the decrypted secret, so
+        // blank always means 'keep existing'.
+        if ($client_secret !== '') {
+            $enc = ETT_Crypto::encrypt_triplet($client_secret);
+            update_option(self::OPT_SSO_CLIENT_SECRET, $enc['ciphertext'], false);
+            update_option(self::OPT_SSO_CLIENT_SECRET . '_iv', $enc['iv'], false);
+            update_option(self::OPT_SSO_CLIENT_SECRET . '_mac', $enc['mac'], false);
+        }
     }
 
 	public static function handle_save_sso(){
@@ -1769,7 +1744,7 @@ class ETT_Admin {
 		check_admin_referer('ett_sso_start');
 
 		$client_id = get_option(self::OPT_SSO_CLIENT_ID, '');
-		$client_secret = self::decrypt_secret(
+		$client_secret = ETT_Crypto::decrypt_triplet(
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET, ''),
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET . '_iv', ''),
 			(string)get_option(self::OPT_SSO_CLIENT_SECRET . '_mac', '')
@@ -1786,7 +1761,7 @@ class ETT_Admin {
 
 		$url = add_query_arg([
 			'response_type' => 'code',
-			'redirect_uri'  => self::sso_callback_url(),
+			'redirect_uri'  => self::unified_callback_url(),
 			'client_id'     => $client_id,
 			'scope'         => self::sso_scopes(),
 			'state'         => $state,
@@ -1859,12 +1834,12 @@ class ETT_Admin {
 
         $tok = $r['data'];
         
-        $encA = self::encrypt_secret((string)$tok['access_token']);
+        $encA = ETT_Crypto::encrypt_triplet((string)$tok['access_token']);
         update_option(self::OPT_SSO_ACCESS_TOKEN, $encA['ciphertext'], false);
         update_option(self::OPT_SSO_ACCESS_TOKEN . '_iv', $encA['iv'], false);
         update_option(self::OPT_SSO_ACCESS_TOKEN . '_mac', $encA['mac'], false);
         
-        $encR = self::encrypt_secret((string)$tok['refresh_token']);
+        $encR = ETT_Crypto::encrypt_triplet((string)$tok['refresh_token']);
         update_option(self::OPT_SSO_REFRESH_TOKEN, $encR['ciphertext'], false);
         update_option(self::OPT_SSO_REFRESH_TOKEN . '_iv', $encR['iv'], false);
         update_option(self::OPT_SSO_REFRESH_TOKEN . '_mac', $encR['mac'], false);
