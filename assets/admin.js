@@ -1452,6 +1452,7 @@
 
 		const pages = $form.find('input[name="batch_max_pages"]').val();
 		const seconds = $form.find('input[name="batch_max_seconds"]').val();
+		const historyBatchSize = $form.find('input[name="history_batch_size"]').val();
 
 		const originalText = $btn.text();
 		$btn.prop('disabled', true).text('Saving...');
@@ -1461,6 +1462,7 @@
 				action: 'ett_save_perf_ajax',
 				batch_max_pages: pages,
 				batch_max_seconds: seconds,
+				history_batch_size: historyBatchSize,
 				_ajax_nonce: ETT_ADMIN.nonce
 			});
 
