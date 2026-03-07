@@ -4,9 +4,9 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.4.1
-License: GPLv3 or later
-License URI: https://www.gnu.org/licenses/gpl-3.0.html
+Stable tag: 1.4.2
+License: GPLv2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
 Admin-only tool to import Fuzzwork market groups/types and pull hub prices from ESI into an external database.
 
@@ -51,6 +51,13 @@ No. All functionality is restricted to the WordPress admin area.
 Yes. Scheduled runs use WordPress cron. For production reliability, a real system cron triggering `wp-cron.php` is recommended.
 
 == Changelog ==
+
+= 1.4.2 =
+* Fixed: Saving SSO settings without re-entering the Client Secret wiped the stored secret — the form never pre-fills the decrypted secret, so submitting with a blank field now preserves the existing value, matching the behaviour of the database password field.
+* Fixed: Plugin deactivation left the `ett_ph_history_tick` WP-Cron hook scheduled and the `ett_ph_cron_history_job_id` option in the database. Both are now cleaned up on deactivation.
+* Fixed: Job history table rendered with a malformed opening tag — the `<table>` element was missing its closing `>`, which caused the table headers to render incorrectly in strict browsers.
+* Security: EVE SSO Client Secret is no longer written into the page source. The secret field now always renders empty; a placeholder indicates whether a secret is already saved. This prevents the decrypted value from appearing in HTML source or browser developer tools.
+* Security: PDO connections to the external database now use real server-side prepared statements (`ATTR_EMULATE_PREPARES => false`), replacing the previous PHP-emulated parameterisation.
 
 = 1.4.1 =
 * Fixed: History fetch concurrency setting not saving — the Advanced performance form was not including the `history_batch_size` field in its AJAX request, so changes to that setting were silently discarded.
@@ -108,6 +115,9 @@ Yes. Scheduled runs use WordPress cron. For production reliability, a real syste
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.4.2 =
+Bug fix and security release. No database schema changes. Safe to upgrade in place. After upgrading, re-enter and save your EVE SSO Client Secret once — the field no longer pre-fills, so the stored value is preserved but you will see the placeholder rather than the previous value.
 
 = 1.4.1 =
 Bug fix release. No database schema changes. Safe to upgrade in place. Note: `ett_prices` is no longer truncated at the start of a run — existing rows are overwritten in-place, so no data loss occurs during an upgrade or first run after updating.
