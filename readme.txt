@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.4.0
+Stable tag: 1.4.1
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -51,6 +51,11 @@ No. All functionality is restricted to the WordPress admin area.
 Yes. Scheduled runs use WordPress cron. For production reliability, a real system cron triggering `wp-cron.php` is recommended.
 
 == Changelog ==
+
+= 1.4.1 =
+* Fixed: History fetch concurrency setting not saving — the Advanced performance form was not including the `history_batch_size` field in its AJAX request, so changes to that setting were silently discarded.
+* Fixed: Plugin options not fully cleaned up on uninstall — `ett_ph_cron_history_job_id`, `ett_history_batch_size`, and the `ett_ph_history_tick` WP-Cron hook were not removed during uninstall. Note: the external database is intentionally never modified by uninstall.
+* Fixed: Price table wiped at the start of each run — `ett_prices` was truncated before new data was written, creating a window where consumers could read an empty or incomplete dataset. Prices are now overwritten in-place via `INSERT … ON DUPLICATE KEY UPDATE`. Rows for types that have no active orders in the current run are left at their previous values; the per-row `fetched_at` timestamp reflects when each price was last refreshed and can be surfaced in consumer plugins as a staleness indicator.
 
 = 1.4.0 =
 * Renamed admin menu entry from "ETT Prices" to "EVE Trade Tools".
@@ -103,6 +108,9 @@ Yes. Scheduled runs use WordPress cron. For production reliability, a real syste
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.4.1 =
+Bug fix release. No database schema changes. Safe to upgrade in place. Note: `ett_prices` is no longer truncated at the start of a run — existing rows are overwritten in-place, so no data loss occurs during an upgrade or first run after updating.
 
 = 1.4.0 =
 The admin menu entry has been renamed to "EVE Trade Tools". Settings are unchanged and no database migration is required.
