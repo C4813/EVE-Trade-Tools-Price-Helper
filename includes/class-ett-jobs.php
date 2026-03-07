@@ -19,7 +19,9 @@ class ETT_Jobs {
 	public static function deactivate_cron() {
 		self::unschedule_all('ett_ph_prices_scheduled_start');
 		self::unschedule_all('ett_ph_prices_tick');
+		self::unschedule_all('ett_ph_history_tick');
 		delete_option(self::OPT_CRON_ACTIVE_JOB_ID);
+		delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
 	}
 
 	private static function unschedule_all(string $hook) : void {
@@ -1171,7 +1173,7 @@ class ETT_Jobs {
 		// Build a fast lookup of our selected type IDs.
 		$selected = [];
 		try {
-			$rows = $pdo->query('SELECT type_id FROM ett_selected_typeids ORDER BY type_id ASC')->fetchAll(PDO::FETCH_COLUMN);
+			$rows = $pdo->query('SELECT type_id FROM ett_selected_typeids ORDER BY type_id ASC')->fetchAll(PDO::FETCH_COLUMN);  // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO -- External DB: wpdb cannot connect to a separate MySQL server; PDO is required here.
 			foreach ($rows as $tid) {
 				$selected[(int)$tid] = true;
 			}
@@ -1317,10 +1319,10 @@ class ETT_Jobs {
 
 		// Pull next batch of type_ids from DB by offset (avoids storing the full list in progress_json)
 		$stmt = $pdo->prepare('SELECT type_id FROM ett_selected_typeids ORDER BY type_id ASC LIMIT ? OFFSET ?');
-		$stmt->bindValue(1, $batch_size, PDO::PARAM_INT);
-		$stmt->bindValue(2, $type_idx,   PDO::PARAM_INT);
+		$stmt->bindValue(1, $batch_size, PDO::PARAM_INT);  // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO -- External DB: wpdb cannot connect to a separate MySQL server; PDO is required here.
+		$stmt->bindValue(2, $type_idx,   PDO::PARAM_INT);  // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO -- External DB: wpdb cannot connect to a separate MySQL server; PDO is required here.
 		$stmt->execute();
-		$batch = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+		$batch = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);  // phpcs:ignore WordPress.DB.RestrictedClasses.mysql__PDO -- External DB: wpdb cannot connect to a separate MySQL server; PDO is required here.
 
 		if (empty($batch)) {
 			// Region exhausted — advance
@@ -1368,7 +1370,7 @@ class ETT_Jobs {
 
 		// Compute 30-day rolling average and bulk-insert
 		$now    = current_time('mysql');
-		$cutoff = date('Y-m-d', strtotime('-30 days'));
+		$cutoff = gmdate('Y-m-d', strtotime('-30 days'));
 
 		$placeholders = [];
 		$params       = [];
@@ -1436,6 +1438,7 @@ class ETT_Jobs {
 	}
 	// phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
 
+	// phpcs:disable WordPress.WP.AlternativeFunctions.curl_curl_multi_init,WordPress.WP.AlternativeFunctions.curl_curl_init,WordPress.WP.AlternativeFunctions.curl_curl_setopt_array,WordPress.WP.AlternativeFunctions.curl_curl_multi_add_handle,WordPress.WP.AlternativeFunctions.curl_curl_multi_exec,WordPress.WP.AlternativeFunctions.curl_curl_multi_select,WordPress.WP.AlternativeFunctions.curl_curl_multi_getcontent,WordPress.WP.AlternativeFunctions.curl_curl_getinfo,WordPress.WP.AlternativeFunctions.curl_curl_multi_remove_handle,WordPress.WP.AlternativeFunctions.curl_curl_close,WordPress.WP.AlternativeFunctions.curl_curl_multi_close -- wp_remote_get() has no parallel/concurrent mode; curl_multi is required to fire N ESI requests simultaneously.
 	private static function curl_multi_history(int $region_id, array $type_ids) : array {
 		$mh      = curl_multi_init();
 		$handles = [];
@@ -1485,4 +1488,5 @@ class ETT_Jobs {
 		curl_multi_close($mh);
 		return $results;
 	}
+	// phpcs:enable
 }
