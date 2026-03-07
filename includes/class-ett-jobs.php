@@ -571,11 +571,12 @@ class ETT_Jobs {
 			$type_ids = ETT_TypeIDs::all($pdo);
 			set_transient('ett_typeids_' . $job_id, $type_ids, 6 * HOUR_IN_SECONDS);
 
-			try {
-				$pdo->exec('TRUNCATE TABLE ett_prices');
-			} catch (Exception $e) {
-				$pdo->exec('DELETE FROM ett_prices');
-			}
+			// NOTE: we do NOT wipe ett_prices here.
+			// Prices are written via INSERT … ON DUPLICATE KEY UPDATE (keyed on hub_key + type_id),
+			// so each row is overwritten in-place as new data arrives. Rows for types that return
+			// no orders in this run are left untouched with their previous fetched_at timestamp,
+			// which consumers can use to detect stale data. This avoids a window where the table
+			// is empty/incomplete while a run is in progress.
 
 			$progress = [
 			    'driver' => $progress['driver'] ?? 'browser',
