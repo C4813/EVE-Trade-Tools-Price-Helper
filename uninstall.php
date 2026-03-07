@@ -28,6 +28,7 @@ $ett_ph_unschedule_all = function (string $hook) {
 
 $ett_ph_unschedule_all('ett_ph_prices_scheduled_start');
 $ett_ph_unschedule_all('ett_ph_prices_tick');
+$ett_ph_unschedule_all('ett_ph_history_tick');
 
 /**
  * Delete plugin options.
@@ -83,6 +84,10 @@ $options = [
 
     // Cron state
     'ett_ph_cron_prices_job_id',
+    'ett_ph_cron_history_job_id',
+
+    // History/performance setting added in later versions
+    'ett_history_batch_size',
 ];
 
 foreach ($options as $opt) {
