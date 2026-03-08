@@ -108,8 +108,20 @@ class ETT_ExternalDB {
 			name VARCHAR(255) NOT NULL,
 			market_group_id BIGINT UNSIGNED NULL,
 			published TINYINT(1) NOT NULL DEFAULT 1,
+			portionSize BIGINT UNSIGNED NOT NULL DEFAULT 1,
 			KEY market_group_id (market_group_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// Migration: add portionSize to existing installations that predate this column.
+		$col = $pdo->prepare("SELECT COUNT(*) AS c
+			FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE()
+				AND TABLE_NAME = 'ett_invTypes'
+				AND COLUMN_NAME = 'portionSize'");
+		$col->execute();
+		if ((int)($col->fetch()['c'] ?? 0) === 0) {
+			$pdo->exec("ALTER TABLE ett_invTypes ADD COLUMN portionSize BIGINT UNSIGNED NOT NULL DEFAULT 1");
+		}
 
 		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_invMetaGroups (
 			meta_group_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
