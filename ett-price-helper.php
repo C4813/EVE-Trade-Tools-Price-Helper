@@ -2,12 +2,11 @@
 /**
  * Plugin Name: EVE Trade Tools Price Helper
  * Description: Admin-only tool to import Fuzzwork market groups/types and pull hub prices from ESI into an external database.
- * Version: 1.4.3
+ * Version: 1.4.4
  * Author: C4813
  * License: GPLv2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: ett-price-helper
- * Domain Path: /languages
  */
 
 if (!defined('ABSPATH')) exit;
