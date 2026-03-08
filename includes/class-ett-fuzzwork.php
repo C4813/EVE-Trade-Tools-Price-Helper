@@ -493,7 +493,7 @@ class ETT_Fuzzwork {
 			$col = [];
 			foreach ($lower as $i => $name) $col[$name] = $i;
 
-			foreach (['typeid', 'typename', 'marketgroupid', 'published'] as $need){
+			foreach (['typeid', 'typename', 'marketgroupid', 'published', 'portionsize'] as $need){
 				if (!isset($col[$need])) {
 					throw new Exception(sprintf('CSV missing column: %s (header detected, but not found)', esc_html(wp_strip_all_tags($need))));
 				}
@@ -502,13 +502,14 @@ class ETT_Fuzzwork {
 			$col = [
 				'typeid'        => 0,
 				'typename'      => 2,
+				'portionsize'   => 6,
 				'published'     => 9,
 				'marketgroupid' => 10,
 			];
 			$pendingFirstDataRow = $first;
 		}
 
-		$insert = $pdo->prepare('INSERT INTO ett_invTypes (type_id, name, market_group_id, published) VALUES (:id,:name,:mg,:pub)');
+		$insert = $pdo->prepare('INSERT INTO ett_invTypes (type_id, name, market_group_id, published, portionSize) VALUES (:id,:name,:mg,:pub,:portion)');
 		$count = 0;
 
 		$toBoolInt = function($v){
@@ -520,22 +521,24 @@ class ETT_Fuzzwork {
 		};
 
 		$processRow = function(array $row) use (&$count, $insert, $col, $toBoolInt){
-			$maxIdx = max($col['typeid'], $col['typename'], $col['marketgroupid'], $col['published']);
+			$maxIdx = max($col['typeid'], $col['typename'], $col['marketgroupid'], $col['published'], $col['portionsize']);
 			if (count($row) <= $maxIdx) return;
 
 			$id = (int)$row[$col['typeid']];
 			if ($id <= 0) return;
 
-			$name = (string)$row[$col['typename']];
-			$mgraw = $row[$col['marketgroupid']];
-			$mg = ($mgraw === '' ? null : (int)$mgraw);
-			$pub = $toBoolInt($row[$col['published']]);
+			$name    = (string)$row[$col['typename']];
+			$mgraw   = $row[$col['marketgroupid']];
+			$mg      = ($mgraw === '' ? null : (int)$mgraw);
+			$pub     = $toBoolInt($row[$col['published']]);
+			$portion = max(1, (int)$row[$col['portionsize']]);
 
 			$insert->execute([
-				':id'   => $id,
-				':name' => $name,
-				':mg'   => $mg,
-				':pub'  => $pub,
+				':id'      => $id,
+				':name'    => $name,
+				':mg'      => $mg,
+				':pub'     => $pub,
+				':portion' => $portion,
 			]);
 
 			$count++;
