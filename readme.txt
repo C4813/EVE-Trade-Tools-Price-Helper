@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.4.2
+Stable tag: 1.4.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -51,6 +51,12 @@ No. All functionality is restricted to the WordPress admin area.
 Yes. Scheduled runs use WordPress cron. For production reliability, a real system cron triggering `wp-cron.php` is recommended.
 
 == Changelog ==
+
+= 1.4.3 =
+* Fixed: `portionSize` was not stored in `ett_invTypes` — the column was absent from both the schema definition and the Fuzzwork CSV importer, causing ETT Reprocess Trading to treat every item as a batch size of 1. Items with a portionSize greater than 1 (e.g. ammunition at 100) produced reprocessed values inflated by the full portionSize factor.
+* Changed: `ett_invTypes` now includes a `portionSize` column. `ensure_schema()` will automatically add the column to existing installations via `ALTER TABLE` on next plugin load.
+* Changed: Fuzzwork `invTypes` CSV importer now reads and stores `portionSize` for every type.
+* Note: a re-run of the Fuzzwork import is required after upgrading to populate portionSize values. Until then, all rows default to 1.
 
 = 1.4.2 =
 * Fixed: Saving SSO settings without re-entering the Client Secret wiped the stored secret — the form never pre-fills the decrypted secret, so submitting with a blank field now preserves the existing value, matching the behaviour of the database password field.
@@ -115,6 +121,9 @@ Yes. Scheduled runs use WordPress cron. For production reliability, a real syste
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.4.3 =
+Schema update: `portionSize` column added to `ett_invTypes`. The column is added automatically via `ALTER TABLE` on next plugin load — no manual migration required. However, a re-run of the Fuzzwork import is required to populate correct portionSize values for existing types. Reprocessing calculations in ETT Reprocess Trading will be incorrect until the import is re-run.
 
 = 1.4.2 =
 Bug fix and security release. No database schema changes. Safe to upgrade in place. After upgrading, re-enter and save your EVE SSO Client Secret once — the field no longer pre-fills, so the stored value is preserved but you will see the placeholder rather than the previous value.
