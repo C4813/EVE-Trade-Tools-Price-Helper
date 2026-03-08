@@ -2,7 +2,7 @@
 
 A WordPress plugin that imports EVE Online static data from Fuzzwork and pulls live market prices from ESI into an external MySQL database, making that data available to other plugins without requiring repeated ESI calls.
 
-Part of the [EVE Trade Tools](https://github.com/) suite. This is the base plugin — other ETT plugins depend on it for database access, SSO credentials, and the shared admin page.
+Part of the EVE Trade Tools suite. This is the base plugin — other ETT plugins depend on it for database access, SSO credentials, and the shared admin page.
 
 ---
 
