@@ -63,7 +63,10 @@ class ETT_Jobs {
 		self::send_no_cache();
 
 		$job_type = sanitize_key($_POST['job_type'] ?? '');
-		if (!in_array($job_type, ['typeids', 'prices'], true)) wp_send_json_error('Bad job_type', 400);
+		if (!in_array($job_type, ['typeids', 'prices', 'history'], true)) wp_send_json_error('Bad job_type', 400);
+
+		// prices_only=1 means: run prices but do NOT auto-create a history job on completion.
+		$prices_only = ($job_type === 'prices' && !empty($_POST['prices_only']));
 
 		ETT_ExternalDB::ensure_schema();
 		$pdo = ETT_ExternalDB::pdo();
@@ -81,8 +84,22 @@ class ETT_Jobs {
         		wp_send_json_error('A prices job is already running', 409);
         	}
         }
-        
-        $job_id = self::create_job($pdo, $job_type, 'browser');
+
+        if ($job_type === 'history') {
+        	$stmt = $pdo->query("
+        		SELECT job_id
+        		FROM ett_jobs
+        		WHERE job_type='history' AND status IN ('queued','running')
+        		ORDER BY started_at DESC
+        		LIMIT 1
+        	");
+        	$active = $stmt ? $stmt->fetchColumn() : false;
+        	if ($active) {
+        		wp_send_json_error('A history job is already running', 409);
+        	}
+        }
+
+        $job_id = self::create_job($pdo, $job_type, 'browser', $prices_only);
 
 		wp_send_json_success([
 			'job_id' => $job_id,
@@ -703,8 +720,9 @@ class ETT_Jobs {
 			}
 		}
 
-		// Auto-create history job when a prices job completes successfully
-		if ($status === 'done' && isset($progress['job_type']) && $progress['job_type'] === 'prices') {
+		// Auto-create history job when a prices job completes successfully,
+		// UNLESS the job was started with prices_only=true (e.g. via the "Run Prices" button).
+		if ($status === 'done' && isset($progress['job_type']) && $progress['job_type'] === 'prices' && empty($progress['prices_only'])) {
 			try {
 				$history_job_id = self::create_job($pdo, 'history', $progress['driver'] ?? 'browser');
 				$progress['history_job_id'] = $history_job_id;
@@ -752,7 +770,7 @@ class ETT_Jobs {
         }
 	}
 
-	private static function create_job(PDO $pdo, string $job_type, string $driver) : string {
+	private static function create_job(PDO $pdo, string $job_type, string $driver, bool $prices_only = false) : string {
 		$job_id = self::uuid4();
 		$now = current_time('mysql');
 
@@ -765,6 +783,11 @@ class ETT_Jobs {
 			'error'    => null,
 			'rows_written' => 0,
 		];
+
+		// Flag to suppress auto-creation of a history job on completion
+		if ($prices_only) {
+			$progress['prices_only'] = true;
+		}
 
 		// Prices/typeids-specific fields — not relevant to history jobs
 		if ($job_type !== 'history') {
@@ -946,9 +969,9 @@ class ETT_Jobs {
 
 	// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared
 	private static function step_history(PDO $pdo, array $progress) : array {
-		$batch_size = (int) get_option(ETT_Admin::OPT_HISTORY_BATCH_SIZE, 5);
+		$batch_size = (int) get_option(ETT_Admin::OPT_HISTORY_BATCH_SIZE, 20);
 		if ($batch_size < 1)  $batch_size = 1;
-		if ($batch_size > 20) $batch_size = 20;
+		if ($batch_size > 50) $batch_size = 50;
 
 		// ── Init phase: resolve regions + count type_ids ──────────────────
 		if (($progress['phase'] ?? 'init') === 'init') {
@@ -1037,8 +1060,9 @@ class ETT_Jobs {
 			return $progress;
 		}
 
-		// Parallel ESI fetch — batch_size controls concurrency per sub-group
-		$results = self::curl_multi_history($region_id, $batch, max(1, min($batch_size, 5)));
+		// Concurrency = batch_size: all items fire in one parallel group, no sub-group gaps.
+		// The error_remain guard inside curl_multi_history handles ESI rate-limit safety.
+		$results = self::curl_multi_history($region_id, $batch, max(1, min($batch_size, 50)));
 
 		// Track rate limiting and errors
 		if (!isset($progress['rate_limited_seen'])) $progress['rate_limited_seen'] = false;
@@ -1104,6 +1128,7 @@ class ETT_Jobs {
 		$progress['items_done']   = ($progress['items_done'] ?? 0) + $fetched;
 		$progress['rows_written'] = ($progress['rows_written'] ?? 0) + $fetched;
 		$progress['current_region'] = $hub_key;
+		$progress['concurrency']  = max(1, min($batch_size, 50));
 
 		$done  = (int) ($progress['items_done'] ?? 0);
 		$total = (int) ($progress['items_total'] ?? 1);
@@ -1144,11 +1169,11 @@ class ETT_Jobs {
 	 *
 	 * @param int   $region_id
 	 * @param int[] $type_ids
-	 * @param int   $concurrency  Max simultaneous connections (default 3)
-	 * @param int   $gap_ms       Milliseconds to pause between sub-groups (default 500)
+	 * @param int   $concurrency  Max simultaneous connections (default 15)
+	 * @param int   $gap_ms       Milliseconds to pause between sub-groups (default 150)
 	 * @return array  map of type_id => ['code'=>int, 'data'=>array, 'error_remain'=>int|null]
 	 */
-	private static function curl_multi_history(int $region_id, array $type_ids, int $concurrency = 3, int $gap_ms = 500) : array {
+	private static function curl_multi_history(int $region_id, array $type_ids, int $concurrency = 3, int $gap_ms = 150) : array {
 		$results       = [];
 		$chunks        = array_chunk($type_ids, $concurrency);
 		$error_remain  = null; // track lowest seen X-Esi-Error-Limit-Remain
