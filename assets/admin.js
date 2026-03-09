@@ -13,6 +13,7 @@
 	let historyRunGen       = 0;
 	let historyStartedAtMs  = null;
 	let historyElapsedTimer = null;
+	let historyCancelling   = false;
 	let idleAttachTimer = null;
 	let terminalAlertShown = false;
 	let elapsedTimer = null;
@@ -148,7 +149,7 @@
 		btnSetLabel($runBtn, runBtnLabel);
 	}
 
-	function startHistoryJob(jobId, startedAt){
+	function startHistoryJob(jobId, startedAt, observeOnlyHistory = false, initialProgress = null){
 		if (historyRunning) return;
 
 		historyJobId       = jobId;
@@ -166,12 +167,47 @@
 		historyRunGen++;
 
 		$('#ett-history-progress').show();
-		renderHistoryProgress({ phase: 'queued', last_msg: 'Starting history fetch…' });
+		// Use real progress if attaching to an already-running job (avoids flicker back to "Starting...")
+		renderHistoryProgress(initialProgress || { phase: 'queued', last_msg: 'Starting history fetch…' });
 		startHistoryElapsedTicker();
 
 		$('#ett-btn-cancel').prop('disabled', false).text('Cancel History');
 
 		const myGen = historyRunGen;
+
+		if (observeOnlyHistory) {
+			// Cron-driven — just poll status, don't call ett_job_step
+			async function doHistoryStatusPoll(){
+				if (!historyRunning || !historyJobId) return;
+				if (myGen !== historyRunGen) return;
+
+				try {
+					const st = await ajax('GET', {
+						action: 'ett_job_status',
+						job_id: historyJobId,
+						_ajax_nonce: ETT_ADMIN.nonce
+					});
+
+					if (myGen !== historyRunGen) return;
+
+					if (st && st.success){
+						renderHistoryProgress(st.data.progress);
+						if (st.data.heartbeat_at) setHistoryHeartbeat(st.data.heartbeat_at);
+
+						if (['done', 'error', 'cancelled'].includes(st.data.status)){
+							stopHistoryJob();
+							refreshRunHistory();
+						}
+					}
+				} catch (e){
+					// transient — keep polling
+				}
+			}
+
+			doHistoryStatusPoll();
+			historyStepTimer = setInterval(doHistoryStatusPoll, 1000);
+			return;
+		}
 
 		async function doHistoryStep(){
 			if (!historyRunning || !historyJobId) return;
@@ -239,7 +275,11 @@
 			return;
 		}
 
-		if (delta <= 15000){
+		// Cron-driven jobs update once per minute — allow 90s before warning.
+		// Manual (browser-driven) jobs step every 500ms — warn after 15s.
+		const staleMs = observeOnly ? 90000 : 15000;
+
+		if (delta <= staleMs){
 			dot.removeClass('bad').addClass('ok');
 			txt.text('Heartbeat OK');
 			$('#ett-stalled').hide();
@@ -248,6 +288,11 @@
 
 		dot.removeClass('ok').addClass('bad');
 		txt.text('Heartbeat stale');
+
+		const stallMsg = observeOnly
+			? 'Waiting for next cron ping — heartbeat updates once per minute.'
+			: 'Heartbeat has not updated recently — job may be stalled (PHP timeout, network issue, or rate limiting).';
+		$('#ett-stalled-text').text(stallMsg);
 		$('#ett-stalled').show();
 	}
 
@@ -460,7 +505,7 @@
 
 		const out = Object.assign({}, progress);
 		if (out.driver === 'browser') out.driver = 'Manual';
-        else if (out.driver === 'cron') out.driver = 'Scheduled';
+        else if (out.driver === 'cron' || out.driver === 'system-cron') out.driver = 'Scheduled';
         
 		let secs = null;
 
@@ -566,28 +611,30 @@
 			const tz = ETT_ADMIN.wp_timezone_string || 'UTC';
 
 			if (!rows.length){
-				host.html('<p class="description">No price runs found yet.</p>');
+				host.html('<p class="description">No runs found yet.</p>');
 				return;
 			}
 
 			let html = '';
 			html += '<table class="widefat striped ett-history-table">';
 			html += '<thead><tr>';
-			html += '<th>Started</th><th>Finished</th><th>Status</th><th>Driver</th><th>Last message</th><th>Error</th>';
+			html += '<th>Type</th><th>Started</th><th>Finished</th><th>Status</th><th>Driver</th><th>Last message</th>';
 			html += '</tr></thead><tbody>';
 
 			for (const row of rows){
+				const typeLabel = row.job_type === 'history' ? 'History fetch' : 'Price run';
 				html += '<tr>';
+				html += `<td>${escapeHtml(typeLabel)}</td>`;
 				html += `<td>${escapeHtml(row.started_at)} (${escapeHtml(tz)})</td>`;
-				html += `<td>${escapeHtml(row.finished_at)} (${escapeHtml(tz)})</td>`;
-				html += `<td>${escapeHtml(row.status)}</td>`;
+				html += `<td>${row.finished_at ? escapeHtml(row.finished_at) + ' (' + escapeHtml(tz) + ')' : '\u2014'}</td>`;
+				const statusLabel = row.status === 'done' ? '\u2705 Done' : row.status === 'error' ? '\u274c Error' : row.status === 'cancelled' ? 'Cancelled' : row.status;
+				html += `<td>${escapeHtml(statusLabel)}</td>`;
 				let driverLabel = row.driver;
-                if (driverLabel === 'browser') driverLabel = 'Manual';
-                else if (driverLabel === 'cron') driverLabel = 'Scheduled';
-                
-                html += `<td>${escapeHtml(driverLabel)}</td>`;
-				html += `<td>${escapeHtml(row.last_msg)}</td>`;
-				html += `<td>${escapeHtml(row.last_error)}</td>`;
+				if (driverLabel === 'browser') driverLabel = 'Manual';
+				else if (driverLabel === 'cron' || driverLabel === 'system-cron') driverLabel = 'Scheduled';
+				html += `<td>${escapeHtml(driverLabel)}</td>`;
+				const msg = row.last_error ? row.last_error : row.last_msg;
+				html += `<td>${escapeHtml(msg)}</td>`;
 				html += '</tr>';
 			}
 
@@ -694,7 +741,7 @@
 
                                     const hJobId = (st.data.progress && st.data.progress.history_job_id) ? st.data.progress.history_job_id : null;
                                     stopJob(!!hJobId);
-                                    if (hJobId) startHistoryJob(hJobId);
+                                    if (hJobId) startHistoryJob(hJobId, null, observeOnly);
                                     return;
                                 }
                         
@@ -713,7 +760,7 @@
                     } finally {
                         statusInFlight = false;
                     }
-                }, 2000);
+                }, 1000);
             }
 
             async function doStepTick(){
@@ -771,7 +818,7 @@
                             }
                             const hJobId = (r.data.progress && r.data.progress.history_job_id) ? r.data.progress.history_job_id : null;
                             stopJob(!!hJobId);
-                            if (hJobId) startHistoryJob(hJobId);
+                            if (hJobId) startHistoryJob(hJobId, null, observeOnly);
                             return;
                           }
 
@@ -913,10 +960,8 @@
 			// If a history job is active on page load, attach to it directly
 			if ((job.job_type || prog.job_type) === 'history') {
 				$('#ett-history-progress').show();
-				renderHistoryProgress(prog);
-				// Pass started_at so elapsed time counts from when the job actually began,
-				// not from when this page was loaded.
-				startHistoryJob(job.job_id, job.started_at || null);
+				const histObserveOnly = (driver === 'system-cron' || driver === 'cron');
+				startHistoryJob(job.job_id, job.started_at || null, histObserveOnly, prog);
 				return;
 			}
 
@@ -944,7 +989,7 @@
 			jobElapsedFinalSecs = null;
 			startElapsedTicker();
 
-			observeOnly = (driver === 'cron');
+			observeOnly = (driver === 'cron' || driver === 'system-cron');
 
 			if ((prog.job_type || job.job_type) === 'prices'){
 				setHeartbeatVisible(true);
@@ -973,11 +1018,12 @@
 				});
 
 				if (!r || !r.success || !r.data || !r.data.job) return;
+				if (historyCancelling) return;
 				attachActiveJobOnLoad();
 			} catch (e){
 				// ignore
 			}
-		}, 5000);
+		}, 1000);
 	}
 
     function stopJob(keepRunBtnDisabled = false){
@@ -1017,6 +1063,8 @@
     async function cancelJob(){
     	// If history is running and prices is not, cancel the history job
     	if (!running && historyRunning && historyJobId) {
+    		if (historyCancelling) return;
+    		historyCancelling = true;
     		$('#ett-btn-cancel').prop('disabled', true).text('Cancelling...');
     		try {
     			await ajax('POST', {
@@ -1025,8 +1073,10 @@
     				_ajax_nonce: ETT_ADMIN.nonce
     			});
     		} catch (e) {}
-    		stopHistoryJob();
+    		stopHistoryJob(); // clears historyRunning — idle watcher blocked by historyCancelling until after this
     		$('#ett-history-phase').text('Cancelled.');
+    		// Clear flag after a short delay to let any in-flight idle watcher polls complete
+    		setTimeout(function(){ historyCancelling = false; }, 1500);
     		return;
     	}
 
