@@ -508,7 +508,7 @@ class ETT_Admin {
 
 		$batch_max_pages   = (int)get_option(self::OPT_BATCH_MAX_PAGES, 5);
 		$batch_max_seconds = (int)get_option(self::OPT_BATCH_MAX_SECONDS, 10);
-		$history_batch_size = (int)get_option(self::OPT_HISTORY_BATCH_SIZE, 15);
+		$history_batch_size = (int)get_option(self::OPT_HISTORY_BATCH_SIZE, 20);
 
 		if ($batch_max_pages < 1) $batch_max_pages = 1;
 		if ($batch_max_pages > 50) $batch_max_pages = 50;
@@ -981,7 +981,7 @@ class ETT_Admin {
 			<div class="ett-card">
 				<h2>Actions</h2>
 
-				<p><strong>Run Prices</strong> pulls prices only for the already generated typeID list.</p>
+				<p><strong>Run All</strong> pulls prices then automatically runs the history fetch. <strong>Run Prices</strong> pulls prices only. <strong>Run History</strong> runs the history fetch only.</p>
 
 				<?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice flag
 					if (!empty($_GET['perf_saved'])): ?>
@@ -1033,7 +1033,7 @@ class ETT_Admin {
 								max="50"
 								value="<?php echo esc_attr($history_batch_size); ?>"
 							/>
-							<p class="description">Number of parallel ESI requests per history step (1–50). Lower this if you are hitting rate limits during the history fetch. Default: 15.</p>
+							<p class="description">Number of parallel ESI requests per history step (1–50). Lower this if you are hitting rate limits during the history fetch. Default: 20.</p>
 						</div>
 
 						<p class="ett-mt-10">
@@ -1043,7 +1043,9 @@ class ETT_Admin {
 				</form>
 
 				<div class="ett-actions">
-					<button class="button button-primary" id="ett-btn-run" <?php disabled(!$schema_ok); ?>>Run Prices</button>
+					<button class="button button-primary" id="ett-btn-run" <?php disabled(!$schema_ok); ?>>Run All</button>
+					<button class="button button-secondary" id="ett-btn-run-prices" <?php disabled(!$schema_ok); ?>>Run Prices</button>
+					<button class="button button-secondary" id="ett-btn-run-history" <?php disabled(!$schema_ok); ?>>Run History</button>
 					<button class="button" id="ett-btn-cancel" disabled>Cancel</button>
 				</div>
 
@@ -1082,14 +1084,13 @@ class ETT_Admin {
 						</div>
 
 						<div class="ett-status-stack">
-							<div class="ett-heartbeat" id="ett-heartbeat">
-								<span class="ett-dot"></span>
-								<span class="ett-hb-text">No heartbeat</span>
-							</div>
-
 							<div class="ett-heartbeat" id="ett-esi">
 								<span class="ett-dot"></span>
 								<span class="ett-hb-text" id="ett-esi-text">ESI: Checking...</span>
+							</div>
+							<div class="ett-heartbeat" id="ett-heartbeat">
+								<span class="ett-dot"></span>
+								<span class="ett-hb-text">No heartbeat</span>
 							</div>
 						</div>
 					</div>
@@ -1110,7 +1111,7 @@ class ETT_Admin {
 					</div>
 			</div>
 
-			<div class="ett-progress ett-mt-10" id="ett-history-progress" style="display:none;">
+			<div class="ett-progress ett-mt-10" id="ett-history-progress">
 				<div class="ett-progress-head">
 					<div>
 						<div class="ett-title">History Fetch Progress</div>
@@ -1119,19 +1120,25 @@ class ETT_Admin {
 					</div>
 
 					<div class="ett-status-stack">
-						<div class="ett-heartbeat" id="ett-history-heartbeat">
-							<span class="ett-dot"></span>
-							<span class="ett-hb-text">No heartbeat</span>
-						</div>
+                        <div class="ett-heartbeat" id="ett-history-esi">
+                            <span class="ett-dot"></span>
+                            <span class="ett-hb-text" id="ett-history-esi-text">ESI: Checking...</span>
+                        </div>
+                        
+                        <div class="ett-heartbeat" id="ett-history-heartbeat" style="display:none;">
+                            <span class="ett-dot"></span>
+                            <span class="ett-hb-text">No heartbeat</span>
+                        </div>
 					</div>
 				</div>
 
-				<div class="ett-kpis" style="grid-template-columns:repeat(5,1fr);">
+				<div class="ett-kpis" style="grid-template-columns:repeat(6,1fr);">
 					<div class="ett-kpi"><div class="ett-k">Elapsed</div><div class="ett-v" id="ett-history-kpi-elapsed">—</div></div>
 					<div class="ett-kpi"><div class="ett-k">Hub</div><div class="ett-v" id="ett-history-kpi-hub">—</div></div>
 					<div class="ett-kpi"><div class="ett-k">Items Done</div><div class="ett-v" id="ett-history-kpi-done">—</div></div>
 					<div class="ett-kpi"><div class="ett-k">Items Total</div><div class="ett-v" id="ett-history-kpi-total">—</div></div>
 					<div class="ett-kpi"><div class="ett-k">Rows Written</div><div class="ett-v" id="ett-history-kpi-written">—</div></div>
+					<div class="ett-kpi"><div class="ett-k">Concurrency</div><div class="ett-v" id="ett-history-kpi-concurrency">—</div></div>
 				</div>
 
 				<div style="margin-top:10px;background:#e2e4e7;border-radius:6px;height:10px;overflow:hidden;">
@@ -1209,16 +1216,6 @@ class ETT_Admin {
 							</td>
 						</tr>
 						<tr>
-							<th>Option B — WP-CLI<br><small style="font-weight:normal">(requires SSH)</small></th>
-							<td>
-								<div style="display:flex;align-items:center;gap:8px">
-									<code id="ett-cli-cmd" style="display:block;flex:1;background:#f6f6f6;padding:8px 10px;border:1px solid #ddd;border-radius:4px;word-break:break-all"><?php echo esc_html($cli_cmd); ?></code>
-									<button type="button" class="button button-small ett-copy-btn" data-target="ett-cli-cmd">Copy</button>
-								</div>
-								<p class="description" style="margin-top:6px">Runs entirely in PHP-CLI with no HTTP overhead. Set your server crontab to <code>* * * * *</code>. Adjust <code>wp</code> to the full path of your WP-CLI binary if needed.</p>
-							</td>
-						</tr>
-						<tr>
 							<th>HTTP token</th>
 							<td>
 								<div style="display:flex;align-items:center;gap:8px">
@@ -1226,6 +1223,16 @@ class ETT_Admin {
 									<button type="button" class="button button-small" id="ett-regen-token">Regenerate</button>
 								</div>
 								<p class="description" style="margin-top:4px">Regenerating invalidates the old token immediately — update your cron URL afterwards.</p>
+							</td>
+						</tr>
+						<tr>
+							<th>Option B — WP-CLI<br><small style="font-weight:normal">(requires SSH)</small></th>
+							<td>
+								<div style="display:flex;align-items:center;gap:8px">
+									<code id="ett-cli-cmd" style="display:block;flex:1;background:#f6f6f6;padding:8px 10px;border:1px solid #ddd;border-radius:4px;word-break:break-all"><?php echo esc_html($cli_cmd); ?></code>
+									<button type="button" class="button button-small ett-copy-btn" data-target="ett-cli-cmd">Copy</button>
+								</div>
+								<p class="description" style="margin-top:6px">Runs entirely in PHP-CLI with no HTTP overhead. Set your server crontab to <code>* * * * *</code>. Adjust <code>wp</code> to the full path of your WP-CLI binary if needed.</p>
 							</td>
 						</tr>
 					</table>
@@ -1560,7 +1567,7 @@ class ETT_Admin {
 
     	$history_batch_size = (int) wp_unslash($src['history_batch_size'] ?? 5);
     	if ($history_batch_size < 1)  $history_batch_size = 1;
-    	if ($history_batch_size > 20) $history_batch_size = 20;
+    	if ($history_batch_size > 50) $history_batch_size = 50;
     	update_option(self::OPT_HISTORY_BATCH_SIZE, $history_batch_size, false);
     
     	return [$batch_max_pages, $batch_max_seconds];
