@@ -3,40 +3,6 @@ if (!defined('ABSPATH')) exit;
 
 class ETT_Jobs {
 	const JOB_RETENTION_DAYS = 90;
-	const OPT_CRON_ACTIVE_JOB_ID         = 'ett_ph_cron_prices_job_id';
-	const OPT_CRON_ACTIVE_HISTORY_JOB_ID = 'ett_ph_cron_history_job_id';
-
-	public static function init_cron() {
-		add_action('ett_ph_prices_scheduled_start', [__CLASS__, 'cron_prices_scheduled_start'], 10, 1);
-		add_action('ett_ph_prices_tick', [__CLASS__, 'cron_prices_tick'], 10, 1);
-		add_action('ett_ph_history_tick', [__CLASS__, 'cron_history_tick'], 10, 1);
-	}
-
-	public static function activate_cron() {
-		self::reschedule_prices_start();
-	}
-
-	public static function deactivate_cron() {
-		self::unschedule_all('ett_ph_prices_scheduled_start');
-		self::unschedule_all('ett_ph_prices_tick');
-		self::unschedule_all('ett_ph_history_tick');
-		delete_option(self::OPT_CRON_ACTIVE_JOB_ID);
-		delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
-	}
-
-	private static function unschedule_all(string $hook) : void {
-		$cron = _get_cron_array();
-		if (!is_array($cron)) return;
-
-		foreach ($cron as $ts => $hooks) {
-			if (empty($hooks[$hook]) || !is_array($hooks[$hook])) continue;
-
-			foreach ($hooks[$hook] as $event) {
-				$args = (isset($event['args']) && is_array($event['args'])) ? $event['args'] : [];
-				wp_unschedule_event((int)$ts, $hook, $args);
-			}
-		}
-	}
 
     private static function debug_log(string $msg) : void {
         if (defined('WP_DEBUG') && WP_DEBUG) {
@@ -57,48 +23,6 @@ class ETT_Jobs {
     
     	return [$pages, (float)$seconds];
     }
-
-	public static function next_scheduled_timestamp(string $hook) : int {
-		$cron = _get_cron_array();
-		if (!is_array($cron)) return 0;
-
-		$next = 0;
-		foreach ($cron as $ts => $hooks) {
-			if (!isset($hooks[$hook]) || !is_array($hooks[$hook])) continue;
-			$ts = (int)$ts;
-			if ($next === 0 || $ts < $next) $next = $ts;
-		}
-
-		return $next;
-	}
-
-	public static function reschedule_prices_start() {
-		self::unschedule_all('ett_ph_prices_scheduled_start');
-
-		$start_time = get_option(ETT_Admin::OPT_SCHED_START_TIME, '03:00');
-		$next_ts = self::next_occurrence_timestamp($start_time);
-
-		wp_schedule_single_event($next_ts, 'ett_ph_prices_scheduled_start', [$next_ts]);
-	}
-
-	public static function cancel_prices_schedule() {
-		self::unschedule_all('ett_ph_prices_scheduled_start');
-	}
-
-	private static function next_occurrence_timestamp(string $hhmm) : int {
-		$tz = wp_timezone();
-		$now = new DateTime('now', $tz);
-
-		$parts = explode(':', $hhmm);
-		$hh = isset($parts[0]) ? (int)$parts[0] : 3;
-		$mm = isset($parts[1]) ? (int)$parts[1] : 0;
-
-		$next = clone $now;
-		$next->setTime($hh, $mm, 0);
-		if ($next <= $now) $next->modify('+1 day');
-
-		return $next->getTimestamp();
-	}
 
 	public static function init_ajax() {
 		add_action('wp_ajax_ett_job_start', [__CLASS__, 'ajax_start']);
@@ -261,22 +185,6 @@ class ETT_Jobs {
 
 		$pdo = ETT_ExternalDB::pdo();
 
-		$active_id = (string)get_option(self::OPT_CRON_ACTIVE_JOB_ID, '');
-		if ($active_id !== '') {
-			$job = self::get_job($pdo, $active_id);
-			if ($job && in_array($job['status'], ['queued', 'running'], true)) {
-				wp_send_json_success(['job' => [
-					'job_id' => $job['job_id'],
-					'job_type' => $job['job_type'],
-					'status' => $job['status'],
-					'started_at' => $job['started_at'],
-					'heartbeat_at' => $job['heartbeat_at'],
-					'progress' => json_decode($job['progress_json'], true),
-					'last_error' => $job['last_error'],
-				]]);
-			}
-		}
-
 		$stmt = $pdo->query("
 			SELECT *
 			FROM ett_jobs
@@ -319,7 +227,7 @@ class ETT_Jobs {
             $sql = "
             	SELECT job_id, job_type, status, started_at, finished_at, heartbeat_at, last_error, progress_json
             	FROM ett_jobs
-            	WHERE job_type = 'prices'
+            	WHERE job_type IN ('prices','history')
             	ORDER BY started_at DESC
             	LIMIT " . (int)$limit;
             
@@ -335,6 +243,7 @@ class ETT_Jobs {
 
 				$out[] = [
 					'job_id' => $r['job_id'] ?? '',
+					'job_type' => $r['job_type'] ?? 'prices',
 					'status' => $r['status'] ?? '',
 					'started_at' => $r['started_at'] ?? '',
 					'finished_at' => $r['finished_at'] ?? '',
@@ -388,152 +297,10 @@ class ETT_Jobs {
 		$progress['last_msg'] = 'Cancelled by user';
         self::finish($pdo, $job_id, 'cancelled', $progress);
         
-        // If this was the cron-active job, stop further cron ticks
-        $active = (string)get_option(self::OPT_CRON_ACTIVE_JOB_ID, '');
-        if ($active === $job_id) {
-        	delete_option(self::OPT_CRON_ACTIVE_JOB_ID);
-        }
-        
         wp_send_json_success(['status' => 'cancelled']);
 
 	}
 
-	public static function cron_prices_scheduled_start($scheduled_ts) {
-		$freq_hours = (int)get_option(ETT_Admin::OPT_SCHED_FREQ_HOURS, 24);
-		if ($freq_hours < 1) $freq_hours = 1;
-		if ($freq_hours > 168) $freq_hours = 168;
-
-        $next_scheduled = (int)$scheduled_ts;
-        $step = $freq_hours * 3600;
-        
-        // advance in fixed steps until it’s in the future
-        do {
-        	$next_scheduled += $step;
-        } while ($next_scheduled <= time());
-        
-        wp_schedule_single_event($next_scheduled, 'ett_ph_prices_scheduled_start', [$next_scheduled]);
-
-		$active = (string)get_option(self::OPT_CRON_ACTIVE_JOB_ID, '');
-		if ($active !== '') return;
-
-		if (!ETT_ExternalDB::is_configured()) return;
-
-		try {
-			ETT_ExternalDB::ensure_schema();
-			$pdo = ETT_ExternalDB::pdo();
-
-            $stmt = $pdo->query("
-            	SELECT job_id
-            	FROM ett_jobs
-            	WHERE job_type='prices' AND status IN ('queued','running')
-            	ORDER BY started_at DESC
-            	LIMIT 1
-            ");
-            $already = $stmt ? $stmt->fetchColumn() : false;
-            if ($already) {
-              update_option(self::OPT_CRON_ACTIVE_JOB_ID, (string)$already, false);
-              wp_schedule_single_event(time() + 1, 'ett_ph_prices_tick', [(string)$already]);
-              return;
-            }
-
-            $job_id = self::create_job($pdo, 'prices', 'cron');
-
-			update_option(self::OPT_CRON_ACTIVE_JOB_ID, $job_id, false);
-
-			wp_schedule_single_event(time() + 1, 'ett_ph_prices_tick', [$job_id]);
-		} catch (\Throwable $e) {
-			delete_option(self::OPT_CRON_ACTIVE_JOB_ID);
-		}
-	}
-
-	public static function cron_prices_tick($job_id) {
-		if (!$job_id) return;
-
-		$active = (string)get_option(self::OPT_CRON_ACTIVE_JOB_ID, '');
-		if ($active !== $job_id) return;
-
-		try {
-			$pdo = ETT_ExternalDB::pdo();
-			$job = self::get_job($pdo, $job_id);
-			if (!$job) {
-				delete_option(self::OPT_CRON_ACTIVE_JOB_ID);
-				return;
-			}
-
-			if (in_array($job['status'], ['done', 'error', 'cancelled'], true)) {
-				delete_option(self::OPT_CRON_ACTIVE_JOB_ID);
-				return;
-			}
-
-			self::update_status($pdo, $job_id, 'running');
-			$progress = json_decode($job['progress_json'], true) ?: [];
-
-            [$max_pages_per_tick, $max_tick_seconds] = self::get_batch_limits();
-            $deadline = microtime(true) + $max_tick_seconds;
-
-            $pages_done = 0;
-            $hb = $job['heartbeat_at'] ?? '';
-
-            do {
-            	if ($job['job_type'] === 'typeids') {
-            		$progress = self::step_typeids($pdo, $progress);
-            	} elseif ($job['job_type'] === 'history') {
-            		$progress = self::step_history($pdo, $progress);
-            	} else {
-            		$progress = self::step_prices($pdo, $progress, $job_id);
-            	}
-            
-            	// checkpoint after every page/step so we don't lose progress on a fatal/timeout
-            	self::heartbeat($pdo, $job_id, $progress);
-            
-            	$pages_done++;
-            
-            	// stop if finished
-            	if (($progress['phase'] ?? '') === 'done') break;
-            
-            	// stop if backoff was set (rate limit or other sleep)
-            	$sleep_until = (int)($progress['sleep_until'] ?? 0);
-            	if ($sleep_until > time()) break;
-            
-            } while ($pages_done < $max_pages_per_tick && microtime(true) < $deadline);
-
-            // Record batch info (mirrors ajax_step) to diagnose cron throughput
-            if (!isset($progress['details']) || !is_array($progress['details'])) $progress['details'] = [];
-            $progress['details']['batch'] = [
-                'pages_done'  => (int)$pages_done,
-                'max_pages'   => (int)$max_pages_per_tick,
-                'max_seconds' => (float)$max_tick_seconds,
-                'stopped_by'  => ((int)($progress['sleep_until'] ?? 0) > time()) ? 'sleep_until'
-                              : ((microtime(true) >= $deadline) ? 'deadline' : 'pages'),
-            ];
-            self::heartbeat($pdo, $job_id, $progress);
-
-			if (($progress['phase'] ?? '') === 'done') {
-				self::finish($pdo, $job_id, 'done', $progress);
-				delete_option(self::OPT_CRON_ACTIVE_JOB_ID);
-				return;
-			}
-
-			$sleep_until = (int)($progress['sleep_until'] ?? 0);
-			$next = time() + 1;
-			if ($sleep_until > time()) $next = $sleep_until;
-
-			wp_schedule_single_event($next, 'ett_ph_prices_tick', [$job_id]);
-		} catch (\Throwable $e) {
-			try {
-				$pdo = ETT_ExternalDB::pdo();
-				$job = self::get_job($pdo, $job_id);
-				$progress = $job ? (json_decode($job['progress_json'], true) ?: []) : [];
-				$progress['phase'] = 'error';
-				$progress['last_msg'] = 'Error: ' . $e->getMessage();
-				$progress['error'] = ['message' => $e->getMessage()];
-				self::finish($pdo, $job_id, 'error', $progress, $e->getMessage());
-			} catch (\Throwable $e2) {
-			}
-
-			delete_option(self::OPT_CRON_ACTIVE_JOB_ID);
-		}
-	}
 
 	private static function step_typeids(PDO $pdo, array $progress) : array {
 		$selected_groups = get_option(ETT_Admin::OPT_SELECTED_GROUPS, []);
@@ -979,13 +746,6 @@ class ETT_Jobs {
 		try {
 			if ($status === 'done' && isset($progress['job_type']) && $progress['job_type'] === 'prices') {
 				update_option('ett_last_price_run_completed_at', current_time('mysql'), false);
-
-				// For cron-driven runs, schedule the history job tick immediately
-				$h_id = $progress['history_job_id'] ?? '';
-				if ($h_id !== '' && ($progress['driver'] ?? '') === 'cron') {
-					update_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID, $h_id, false);
-					wp_schedule_single_event(time() + 1, 'ett_ph_history_tick', [$h_id]);
-				}
 			}
         } catch (Exception $e) {
         	self::debug_log('[ETT] finish() housekeeping failed: ' . $e->getMessage());
@@ -1061,69 +821,6 @@ class ETT_Jobs {
 		return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($d), 4));
 	}
 
-	// ── History job ────────────────────────────────────────────────────────
-
-	public static function cron_history_tick(string $job_id) : void {
-		if (!$job_id) return;
-
-		$active = (string) get_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID, '');
-		if ($active !== $job_id) return;
-
-		try {
-			$pdo = ETT_ExternalDB::pdo();
-			$job = self::get_job($pdo, $job_id);
-
-			if (!$job) {
-				delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
-				return;
-			}
-
-			if (in_array($job['status'], ['done', 'error', 'cancelled'], true)) {
-				delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
-				return;
-			}
-
-			self::update_status($pdo, $job_id, 'running');
-			$progress = json_decode($job['progress_json'], true) ?: [];
-
-			[$max_pages, $max_seconds] = self::get_batch_limits();
-			$deadline   = microtime(true) + $max_seconds;
-			$pages_done = 0;
-
-			do {
-				$progress = self::step_history($pdo, $progress);
-				self::heartbeat($pdo, $job_id, $progress);
-				$pages_done++;
-
-				if (($progress['phase'] ?? '') === 'done') break;
-			} while ($pages_done < $max_pages && microtime(true) < $deadline);
-
-			if (($progress['phase'] ?? '') === 'done') {
-				self::finish($pdo, $job_id, 'done', $progress);
-				delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
-				return;
-			}
-
-			self::heartbeat($pdo, $job_id, $progress);
-
-			$sleep_until = (int)($progress['sleep_until'] ?? 0);
-			$next_tick   = ($sleep_until > time()) ? $sleep_until : time() + 1;
-			wp_schedule_single_event($next_tick, 'ett_ph_history_tick', [$job_id]);
-
-		} catch (\Throwable $e) {
-			self::debug_log('[ETT] cron_history_tick error: ' . $e->getMessage());
-			try {
-				$pdo = ETT_ExternalDB::pdo();
-				$job = self::get_job($pdo, $job_id);
-				$progress = $job ? (json_decode($job['progress_json'], true) ?: []) : [];
-				$progress['phase']    = 'error';
-				$progress['last_msg'] = 'Error: ' . $e->getMessage();
-				$progress['error']    = ['message' => $e->getMessage()];
-				self::finish($pdo, $job_id, 'error', $progress, $e->getMessage());
-			} catch (\Throwable $e2) {}
-			delete_option(self::OPT_CRON_ACTIVE_HISTORY_JOB_ID);
-		}
-	}
 
 	// ── Adjusted prices step ───────────────────────────────────────────────
 
@@ -1249,9 +946,9 @@ class ETT_Jobs {
 
 	// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared
 	private static function step_history(PDO $pdo, array $progress) : array {
-		$batch_size = (int) get_option(ETT_Admin::OPT_HISTORY_BATCH_SIZE, 15);
+		$batch_size = (int) get_option(ETT_Admin::OPT_HISTORY_BATCH_SIZE, 5);
 		if ($batch_size < 1)  $batch_size = 1;
-		if ($batch_size > 50) $batch_size = 50;
+		if ($batch_size > 20) $batch_size = 20;
 
 		// ── Init phase: resolve regions + count type_ids ──────────────────
 		if (($progress['phase'] ?? 'init') === 'init') {
@@ -1340,8 +1037,8 @@ class ETT_Jobs {
 			return $progress;
 		}
 
-		// Parallel ESI fetch
-		$results = self::curl_multi_history($region_id, $batch);
+		// Parallel ESI fetch — batch_size controls concurrency per sub-group
+		$results = self::curl_multi_history($region_id, $batch, max(1, min($batch_size, 5)));
 
 		// Track rate limiting and errors
 		if (!isset($progress['rate_limited_seen'])) $progress['rate_limited_seen'] = false;
@@ -1439,53 +1136,102 @@ class ETT_Jobs {
 	// phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
 
 	// phpcs:disable WordPress.WP.AlternativeFunctions.curl_curl_multi_init,WordPress.WP.AlternativeFunctions.curl_curl_init,WordPress.WP.AlternativeFunctions.curl_curl_setopt_array,WordPress.WP.AlternativeFunctions.curl_curl_multi_add_handle,WordPress.WP.AlternativeFunctions.curl_curl_multi_exec,WordPress.WP.AlternativeFunctions.curl_curl_multi_select,WordPress.WP.AlternativeFunctions.curl_curl_multi_getcontent,WordPress.WP.AlternativeFunctions.curl_curl_getinfo,WordPress.WP.AlternativeFunctions.curl_curl_multi_remove_handle,WordPress.WP.AlternativeFunctions.curl_curl_close,WordPress.WP.AlternativeFunctions.curl_curl_multi_close -- wp_remote_get() has no parallel/concurrent mode; curl_multi is required to fire N ESI requests simultaneously.
-	private static function curl_multi_history(int $region_id, array $type_ids) : array {
-		$mh      = curl_multi_init();
-		$handles = [];
+	/**
+	 * Fetch market history for multiple type_ids in parallel, but in small
+	 * staggered sub-groups to avoid hammering ESI. Reads X-Esi-Error-Limit-Remain
+	 * from response headers and returns early with a 429-like signal if the error
+	 * budget is nearly exhausted.
+	 *
+	 * @param int   $region_id
+	 * @param int[] $type_ids
+	 * @param int   $concurrency  Max simultaneous connections (default 3)
+	 * @param int   $gap_ms       Milliseconds to pause between sub-groups (default 500)
+	 * @return array  map of type_id => ['code'=>int, 'data'=>array, 'error_remain'=>int|null]
+	 */
+	private static function curl_multi_history(int $region_id, array $type_ids, int $concurrency = 3, int $gap_ms = 500) : array {
+		$results       = [];
+		$chunks        = array_chunk($type_ids, $concurrency);
+		$error_remain  = null; // track lowest seen X-Esi-Error-Limit-Remain
 
-		foreach ($type_ids as $type_id) {
-			$url = "https://esi.evetech.net/latest/markets/{$region_id}/history/?type_id={$type_id}&datasource=tranquility";
-			$ch  = curl_init($url);
-			curl_setopt_array($ch, [
-				CURLOPT_RETURNTRANSFER => true,
-				CURLOPT_TIMEOUT        => 30,
-				CURLOPT_CONNECTTIMEOUT => 10,
-				CURLOPT_HTTPHEADER     => [
-					'Accept: application/json',
-					'User-Agent: ETT-Price-Helper/WordPress',
-				],
-			]);
-			$handles[$type_id] = $ch;
-			curl_multi_add_handle($mh, $ch);
-		}
+		foreach ($chunks as $chunk_idx => $chunk) {
+			// If our error budget is critically low, stop early and signal 429 for
+			// remaining type_ids so the caller backs off.
+			if ($error_remain !== null && $error_remain < 10) {
+				foreach ($chunk as $tid) {
+					$results[$tid] = ['code' => 429, 'data' => []];
+				}
+				continue;
+			}
 
-		do {
-			$status = curl_multi_exec($mh, $active);
-			if ($active) curl_multi_select($mh, 1.0);
-		} while ($active && $status === CURLM_OK);
+			$mh      = curl_multi_init();
+			$handles = [];
+			$headers = []; // per-handle response headers
 
-		$results = [];
-		foreach ($handles as $type_id => $ch) {
-			$body = curl_multi_getcontent($ch);
-			$code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-			curl_multi_remove_handle($mh, $ch);
-			curl_close($ch);
+			foreach ($chunk as $type_id) {
+				$url = "https://esi.evetech.net/latest/markets/{$region_id}/history/?type_id={$type_id}&datasource=tranquility";
+				$ch  = curl_init($url);
+				$headers[$type_id] = '';
+				// Capture response headers via CURLOPT_HEADERFUNCTION
+				curl_setopt_array($ch, [
+					CURLOPT_RETURNTRANSFER  => true,
+					CURLOPT_TIMEOUT         => 30,
+					CURLOPT_CONNECTTIMEOUT  => 10,
+					CURLOPT_HTTPHEADER      => [
+						'Accept: application/json',
+						'User-Agent: ETT-Price-Helper/WordPress',
+					],
+					CURLOPT_HEADERFUNCTION  => function($ch_inner, $header) use ($type_id, &$headers) {
+						$headers[$type_id] .= $header;
+						return strlen($header);
+					},
+				]);
+				$handles[$type_id] = $ch;
+				curl_multi_add_handle($mh, $ch);
+			}
 
-			if ($code === 200 && $body !== '') {
-				$decoded           = json_decode($body, true);
-				$results[$type_id] = [
-					'code' => 200,
-					'data' => is_array($decoded) ? $decoded : [],
-				];
-			} else {
-				$results[$type_id] = [
-					'code' => $code,
-					'data' => [],
-				];
+			do {
+				$status = curl_multi_exec($mh, $active);
+				if ($active) curl_multi_select($mh, 1.0);
+			} while ($active && $status === CURLM_OK);
+
+			foreach ($handles as $type_id => $ch) {
+				$body = curl_multi_getcontent($ch);
+				$code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+				curl_multi_remove_handle($mh, $ch);
+				curl_close($ch);
+
+				// Parse X-Esi-Error-Limit-Remain from captured headers
+				if (preg_match('/X-Esi-Error-Limit-Remain:\s*(\d+)/i', $headers[$type_id] ?? '', $m)) {
+					$remain = (int) $m[1];
+					if ($error_remain === null || $remain < $error_remain) {
+						$error_remain = $remain;
+					}
+				}
+
+				if ($code === 200 && $body !== '') {
+					$decoded           = json_decode($body, true);
+					$results[$type_id] = [
+						'code'         => 200,
+						'data'         => is_array($decoded) ? $decoded : [],
+						'error_remain' => $error_remain,
+					];
+				} else {
+					$results[$type_id] = [
+						'code'         => $code,
+						'data'         => [],
+						'error_remain' => $error_remain,
+					];
+				}
+			}
+
+			curl_multi_close($mh);
+
+			// Pause between sub-groups (except after the last one)
+			if ($chunk_idx < count($chunks) - 1) {
+				usleep($gap_ms * 1000);
 			}
 		}
 
-		curl_multi_close($mh);
 		return $results;
 	}
 	// phpcs:enable
