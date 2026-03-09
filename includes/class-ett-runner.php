@@ -287,9 +287,8 @@ class ETT_Runner {
 
                 if ($job_type === 'prices') {
                     update_option('ett_last_price_run_completed_at', current_time('mysql'), false);
-                    try {
-                        self::create_job($pdo, 'history', 'system-cron');
-                    } catch (\Throwable $e) { /* non-fatal */ }
+                    // Note: ETT_Jobs::finish() (called via finish_job above) already auto-creates
+                    // the history job — do NOT create a second one here.
                 }
 
                 return [
@@ -439,10 +438,14 @@ class ETT_Runner {
         if (!$prices_result['ok']) return $prices_result;
 
         update_option('ett_last_price_run_completed_at', current_time('mysql'), false);
-        if ($logger) $logger('Prices complete. Starting history job…');
+        if ($logger) $logger('Prices complete. Looking up history job…');
 
-        $history_job_id = self::create_job($pdo, 'history', 'system-cron');
-        if ($logger) $logger("Started history job: {$history_job_id}");
+        // ETT_Jobs::finish() (called inside drive_to_done) already created the history job.
+        // Find it rather than creating a duplicate.
+        $stmt = $pdo->prepare("SELECT job_id FROM ett_jobs WHERE job_type='history' AND status='queued' ORDER BY started_at DESC LIMIT 1");
+        $stmt->execute();
+        $history_job_id = $stmt->fetchColumn() ?: self::create_job($pdo, 'history', 'system-cron');
+        if ($logger) $logger("Starting history job: {$history_job_id}");
 
         $history_result = self::drive_to_done($pdo, $history_job_id, $deadline, 'history', $logger);
 
