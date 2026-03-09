@@ -25,9 +25,12 @@
 	let esiOverall = null; // 'OK'|'Degraded'|'Recovering'|'Down'|null
 	let observeOnly = false; // true = status-only, do not call ett_job_step (used for cron-driven jobs)
 	let runBtnLabel = null;
+	let runPricesBtnLabel = null;
+	let runHistoryBtnLabel = null;
 	let genBtnLabel = null;
     let genBtnFlashTimer = null;
 	let runGen = 0; // increments whenever we stop/cancel/start to invalidate in-flight AJAX responses
+	let lastHeartbeatMs = null; // local receipt time of most recent prices heartbeat
     let statusInFlight = false;
     let stepInFlight = false;
 
@@ -58,7 +61,7 @@
 		const txt = el.find('.ett-hb-text');
 
 		if (!tsMysql){
-			dot.removeClass('ok bad');
+			dot.removeClass('ok bad warn');
 			txt.text('No heartbeat');
 			return;
 		}
@@ -67,18 +70,25 @@
 		const delta = nowMs() - hb.getTime();
 
 		if (isNaN(delta)){
-			dot.removeClass('ok bad');
+			dot.removeClass('ok bad warn');
 			txt.text('Heartbeat unknown');
 			return;
 		}
 
 		if (delta <= 15000){
-			dot.removeClass('bad').addClass('ok');
+			dot.removeClass('bad warn').addClass('ok');
 			txt.text('Heartbeat OK');
-		} else {
-			dot.removeClass('ok').addClass('bad');
-			txt.text('Heartbeat stale');
+			return;
 		}
+
+		if (delta <= 90000){
+			dot.removeClass('ok bad').addClass('warn');
+			txt.text('Waiting for heartbeat');
+			return;
+		}
+
+		dot.removeClass('ok warn').addClass('bad');
+		txt.text('Heartbeat stale');
 	}
 
 	function renderHistoryProgress(progress){
@@ -117,6 +127,7 @@
 		$('#ett-history-kpi-done').text(fmtInt(progress.items_done));
 		$('#ett-history-kpi-total').text(fmtInt(progress.items_total));
 		$('#ett-history-kpi-written').text(fmtInt(progress.rows_written));
+		$('#ett-history-kpi-concurrency').text(progress.concurrency != null ? progress.concurrency : '—');
 
 		const done  = Number(progress.items_done  || 0);
 		const total = Number(progress.items_total || 0);
@@ -142,11 +153,15 @@
 		historyStepTimer = null;
 		stopHistoryElapsedTicker();
 		$('#ett-btn-cancel').prop('disabled', true).text('Cancel');
+		$('#ett-history-heartbeat').hide();
 
 		const $runBtn = $('#ett-btn-run');
 		if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
 		$runBtn.prop('disabled', false);
 		btnSetLabel($runBtn, runBtnLabel);
+		if (runPricesBtnLabel !== null) btnSetLabel($('#ett-btn-run-prices'), runPricesBtnLabel);
+		$('#ett-btn-run-prices').prop('disabled', false);
+		$('#ett-btn-run-history').prop('disabled', false);
 	}
 
 	function startHistoryJob(jobId, startedAt, observeOnlyHistory = false, initialProgress = null){
@@ -167,11 +182,15 @@
 		historyRunGen++;
 
 		$('#ett-history-progress').show();
+		$('#ett-history-heartbeat').show();
 		// Use real progress if attaching to an already-running job (avoids flicker back to "Starting...")
 		renderHistoryProgress(initialProgress || { phase: 'queued', last_msg: 'Starting history fetch…' });
 		startHistoryElapsedTicker();
 
 		$('#ett-btn-cancel').prop('disabled', false).text('Cancel History');
+		$('#ett-btn-run').prop('disabled', true);
+		$('#ett-btn-run-prices').prop('disabled', true);
+		$('#ett-btn-run-history').prop('disabled', true);
 
 		const myGen = historyRunGen;
 
@@ -261,41 +280,45 @@
 		const txt = el.find('.ett-hb-text');
 
 		if (!tsMysql){
-			dot.removeClass('ok bad');
+			dot.removeClass('ok bad warn');
 			txt.text('No heartbeat');
 			return;
 		}
 
-		const hb = new Date(tsMysql.replace(' ', 'T'));
-		const delta = nowMs() - hb.getTime();
-
-		if (isNaN(delta)){
-			dot.removeClass('ok bad');
-			txt.text('Heartbeat unknown');
-			return;
-		}
-
-		// Cron-driven jobs update once per minute — allow 90s before warning.
-		// Manual (browser-driven) jobs step every 500ms — warn after 15s.
-		const staleMs = observeOnly ? 90000 : 15000;
-
-		if (delta <= staleMs){
-			dot.removeClass('bad').addClass('ok');
-			txt.text('Heartbeat OK');
-			$('#ett-stalled').hide();
-			return;
-		}
-
-		dot.removeClass('ok').addClass('bad');
-		txt.text('Heartbeat stale');
-
-		const stallMsg = observeOnly
-			? 'Waiting for next cron ping — heartbeat updates once per minute.'
-			: 'Heartbeat has not updated recently — job may be stalled (PHP timeout, network issue, or rate limiting).';
-		$('#ett-stalled-text').text(stallMsg);
-		$('#ett-stalled').show();
+        // Record local receipt time to avoid server/browser timezone mismatch
+        lastHeartbeatMs = Date.now();
+        dot.removeClass('bad warn').addClass('ok');
+        txt.text('Heartbeat OK');
+        $('#ett-stalled').hide();
 	}
 
+    function refreshHeartbeatDisplay(){
+        if (lastHeartbeatMs === null) return;
+        const el = $('#ett-heartbeat');
+        const dot = el.find('.ett-dot');
+        const txt = el.find('.ett-hb-text');
+        const delta = Date.now() - lastHeartbeatMs;
+    
+        if (delta <= 15000){
+            dot.removeClass('bad warn').addClass('ok');
+            txt.text('Heartbeat OK');
+            $('#ett-stalled').hide();
+            return;
+        }
+        if (delta <= 90000){
+            dot.removeClass('ok bad').addClass('warn');
+            txt.text('Waiting for heartbeat');
+            $('#ett-stalled').hide();
+            return;
+        }
+        dot.removeClass('ok warn').addClass('bad');
+        txt.text('Heartbeat stale');
+        const stallMsg = observeOnly
+            ? 'No heartbeat for over 90 seconds — the cron job may not be running or the job may have stalled.'
+            : 'Heartbeat has not updated recently — job may be stalled (PHP timeout, network issue, or rate limiting).';
+        $('#ett-stalled-text').text(stallMsg);
+        $('#ett-stalled').show();
+    }
 	function parseWpMysql(ts){
 		if (!ts) return null;
 		const d = new Date(ts.replace(' ', 'T'));
@@ -326,6 +349,7 @@
 			if (!jobStartedAtMs) return;
 			const secs = Math.floor((Date.now() - jobStartedAtMs) / 1000);
 			$('#ett-kpi-elapsed').text(formatHMS(secs));
+			refreshHeartbeatDisplay();
 		};
 
 		tick();
@@ -540,6 +564,14 @@
 
 		txt.text(text || 'ESI: Unknown');
 		txt.attr('title', note ? String(note) : '');
+
+		// Mirror into history fetch panel
+		const hDot = $('#ett-history-esi .ett-dot');
+		const hTxt = $('#ett-history-esi-text');
+		hDot.removeClass('ok warn bad');
+		if (colorClass) hDot.addClass(colorClass);
+		hTxt.text(text || 'ESI: Unknown');
+		hTxt.attr('title', note ? String(note) : '');
 	}
 
 	async function refreshEsiStatus(){
@@ -573,16 +605,21 @@
 		}
 
 		const runBtn = $('#ett-btn-run');
+		const runPricesBtn = $('#ett-btn-run-prices');
+		const runHistoryBtn = $('#ett-btn-run-history');
 		if (runBtnLabel === null) runBtnLabel = runBtn.text();
+		if (runPricesBtnLabel === null) runPricesBtnLabel = runPricesBtn.text();
+		if (runHistoryBtnLabel === null) runHistoryBtnLabel = runHistoryBtn.text();
 
 		if (esiOverall === 'Down'){
-			runBtn.prop('disabled', true);
-			runBtn.text('ESI DOWN');
+			runBtn.prop('disabled', true).text('ESI DOWN');
+			runPricesBtn.prop('disabled', true);
 			return;
 		}
 
-		runBtn.prop('disabled', !!running || !!historyRunning);
-		runBtn.text(runBtnLabel);
+		runBtn.prop('disabled', !!running || !!historyRunning).text(runBtnLabel);
+		runPricesBtn.prop('disabled', !!running || !!historyRunning);
+		runHistoryBtn.prop('disabled', !!running || !!historyRunning);
 	}
 
     function escapeHtml(s){
@@ -865,7 +902,7 @@
 
 	}
 
-    async function startJob(jobType){
+    async function startJob(jobType, opts = {}){
     	if (running) return;
     
     	runGen++;
@@ -876,25 +913,22 @@
         $('#ett-btn-cancel').text('Cancel');
 
         $('#ett-btn-cancel').prop('disabled', false);
-        
-        // When starting a price run, collapse the history section if it is open
-        // so stale "Completed" state from a previous run is not left visible.
-        if (jobType === 'prices'){
-            const details = document.getElementById('ett-history-details');
-            if (details && details.open){
-                details.open = false;
-                stopHistoryAutoRefresh();
-            }
-            // Also hide the history fetch progress panel (separate from the details element)
-            $('#ett-history-progress').hide();
-        }
 
-        // Disable only the button that started the job
+        // Disable all run buttons while a job is active
         if (jobType === 'prices'){
-          const $runBtn = $('#ett-btn-run');
-          if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
-          $runBtn.prop('disabled', true);
-          btnSetLabel($runBtn, 'Running...');
+          const $runBtn = opts.pricesOnly ? $('#ett-btn-run-prices') : $('#ett-btn-run');
+          if (opts.pricesOnly){
+            if (runPricesBtnLabel === null) runPricesBtnLabel = btnGetLabel($runBtn);
+            $runBtn.prop('disabled', true);
+            btnSetLabel($runBtn, 'Running...');
+          } else {
+            if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
+            $runBtn.prop('disabled', true);
+            btnSetLabel($runBtn, 'Running...');
+          }
+          $('#ett-btn-run-prices').prop('disabled', true);
+          $('#ett-btn-run').prop('disabled', true);
+          $('#ett-btn-run-history').prop('disabled', true);
         } else if (jobType === 'typeids'){
           const $genBtn = $('#ett-btn-generate');
           if (genBtnLabel === null) genBtnLabel = btnGetLabel($genBtn);
@@ -909,17 +943,24 @@
 		const res = await ajax('POST', {
 			action: 'ett_job_start',
 			job_type: jobType,
+			...(opts.pricesOnly ? { prices_only: 1 } : {}),
 			_ajax_nonce: ETT_ADMIN.nonce
 		});
 
         if (!res || !res.success){
           running = false;
           $('#ett-btn-cancel').prop('disabled', true);
-        
+          $('#ett-btn-run').prop('disabled', false);
+          $('#ett-btn-run-prices').prop('disabled', false);
+          $('#ett-btn-run-history').prop('disabled', false);
+
           // Restore button labels on start failure
-          if (jobType === 'prices' && runBtnLabel !== null){
-            btnSetLabel($('#ett-btn-run'), runBtnLabel);
-            $('#ett-btn-run').prop('disabled', false);
+          if (jobType === 'prices'){
+            if (opts.pricesOnly && runPricesBtnLabel !== null){
+              btnSetLabel($('#ett-btn-run-prices'), runPricesBtnLabel);
+            } else if (runBtnLabel !== null){
+              btnSetLabel($('#ett-btn-run'), runBtnLabel);
+            }
           }
           if (jobType === 'typeids' && genBtnLabel !== null){
             btnSetLabel($('#ett-btn-generate'), genBtnLabel);
@@ -973,6 +1014,8 @@
 
 			$('#ett-btn-cancel').prop('disabled', false);
 			$('#ett-btn-run').prop('disabled', true);
+			$('#ett-btn-run-prices').prop('disabled', true);
+			$('#ett-btn-run-history').prop('disabled', true);
 
 			// A prices (or other) job is already running — hide any stale history progress
 			// panel that may have been left visible from a previous run.
@@ -1041,11 +1084,12 @@
 		statusTimer = null;
 
 		stopElapsedTicker();
-		setHeartbeatVisible(false);
+        setHeartbeatVisible(false);
+        lastHeartbeatMs = null;
 
         $('#ett-btn-cancel').prop('disabled', true);
 
-        // Run Prices button stays disabled until history job completes.
+        // Re-enable all run buttons when a job finishes (unless history is still running).
         // keepRunBtnDisabled is passed as true when a history job is about to start
         // immediately after this call, so historyRunning hasn't been set to true yet.
         if (!historyRunning && !keepRunBtnDisabled) {
@@ -1053,6 +1097,9 @@
             if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
             $runBtn.prop('disabled', false);
             btnSetLabel($runBtn, runBtnLabel);
+            if (runPricesBtnLabel !== null) btnSetLabel($('#ett-btn-run-prices'), runPricesBtnLabel);
+            $('#ett-btn-run-prices').prop('disabled', false);
+            $('#ett-btn-run-history').prop('disabled', false);
         }
 
 		refreshRunHistory();
@@ -1211,6 +1258,61 @@
 		}
 
 		startJob('prices');
+	});
+
+	$('#ett-btn-run-prices').on('click', function(e){
+		e.preventDefault();
+		if (esiOverall === 'Down') return;
+
+		const last = ETT_ADMIN.last_price_run_completed_at;
+		const secs = secondsSince(last);
+		const isWarnEsi = (esiOverall === 'Degraded' || esiOverall === 'Recovering');
+
+		if (isWarnEsi){
+			if (secs !== null && secs < (4 * 3600)){
+				showRunConfirm(' ', () => startJob('prices', { pricesOnly: true }));
+				startConfirmTicker();
+				return;
+			}
+			showRunConfirm(
+				`ESI is currently ${esiOverall}. Running prices now may fail or be slow.\n\nRun at your own risk. Continue?`,
+				() => startJob('prices', { pricesOnly: true })
+			);
+			return;
+		}
+
+		if (secs !== null && secs < (4 * 3600)){
+			showRunConfirm(' ', () => startJob('prices', { pricesOnly: true }));
+			startConfirmTicker();
+			return;
+		}
+
+		startJob('prices', { pricesOnly: true });
+	});
+
+	$('#ett-btn-run-history').on('click', async function(e){
+		e.preventDefault();
+		if (running || historyRunning) return;
+
+		$('#ett-btn-run').prop('disabled', true);
+		$('#ett-btn-run-prices').prop('disabled', true);
+		$('#ett-btn-run-history').prop('disabled', true);
+
+		const res = await ajax('POST', {
+			action: 'ett_job_start',
+			job_type: 'history',
+			_ajax_nonce: ETT_ADMIN.nonce
+		});
+
+		if (!res || !res.success){
+			$('#ett-btn-run').prop('disabled', false);
+			$('#ett-btn-run-prices').prop('disabled', false);
+			$('#ett-btn-run-history').prop('disabled', false);
+			alert((res && res.data && res.data.message) ? res.data.message : 'Failed to start history job.');
+			return;
+		}
+
+		startHistoryJob(res.data.job_id, null, false);
 	});
 
 	$('#ett-btn-cancel').on('click', function(e){
