@@ -13,8 +13,8 @@ Part of the EVE Trade Tools suite. This is the base plugin — other ETT plugins
 - **Structure price support** — optional secondary and tertiary player structure per hub, fetched via EVE SSO; 401/403 responses are skipped cleanly rather than retried
 - **Adjusted prices** — fetches CCP's adjusted price list from ESI after each hub run and stores it for use in reprocessing tax calculations
 - **Market history** — fetches 30-day rolling average daily volume per type per region via parallel ESI requests; Rens and Hek share the Heimatar region and are fetched once
-- **Tick-based job execution** — all jobs run in short incremental ticks driven by WP-Cron; no long-running PHP execution required
-- **Configurable scheduler** — set a daily start time and repeat frequency (1–168 hours)
+- **System cron runner** — jobs are driven by an external cron service pinging `/?ett_ph_run=TOKEN` each minute; each ping works for the full PHP execution window before saving state and resuming on the next ping
+- **Configurable scheduler** — set a daily start time and repeat frequency (1–168 hours); pause and resume without losing settings
 - **Manual job control** — start, monitor, and cancel jobs from the admin page with live progress updates
 - **Job history** — completed jobs retained for 90 days with full progress and error detail
 - **ESI error handling** — rate limit backoff (HTTP 429/420) with `Retry-After` support; transient errors retry after 5 seconds
@@ -88,15 +88,23 @@ For each hub you can optionally configure a secondary and tertiary player struct
 
 To enable structure access, connect an EVE character under the SSO settings with the `esi-markets.structure_markets.v1` scope.
 
-### 6. Configure the schedule
+### 6. Configure the schedule and external cron
 
-Set a daily start time (uses the WordPress site timezone) and a repeat frequency in hours. The scheduler uses single `wp_schedule_single_event` events that self-reschedule on each run, rather than a recurring WP-Cron interval. For reliable execution in production, use a real system cron to trigger `wp-cron.php` rather than relying on site traffic.
+Set a daily start time (uses the WordPress site timezone) and a repeat frequency in hours. Use the **Pause / Resume** button to suspend scheduled runs without clearing your settings — in-progress jobs always complete normally.
+
+**Scheduled runs require an external cron service.** The plugin no longer uses WP-Cron. Configure your cron service to send a request to the runner URL every minute:
+
+```
+https://your-site.com/?ett_ph_run=TOKEN
+```
+
+The full URL including the token is shown in the **Schedule** tab. Each ping processes work for the full PHP execution window before saving state; a 10–20 minute run completes across a handful of pings with no PHP timeout risk.
 
 ---
 
 ## Job Types
 
-All jobs run via the same tick-based execution model. Each tick processes up to a configurable number of ESI pages within a configurable time budget, then yields back to WP-Cron.
+All jobs run via the same tick-based execution model. Each tick processes up to a configurable number of ESI pages within a configurable time budget, then saves state and yields until the next cron ping.
 
 ### `typeids`
 
@@ -114,7 +122,7 @@ A history job is created and queued automatically when a prices job completes su
 
 ### `history`
 
-Fetches 30-day rolling average daily volume per type per region using parallel `curl_multi` requests to `GET /markets/{region_id}/history/`. Results are upserted into `ett_market_history`. Rens and Hek share the Heimatar region (`10000030`) and are deduplicated — the region is fetched once and the result written under both hub keys.
+Fetches 30-day rolling average daily volume per type per region using parallel `curl_multi` requests to `GET /markets/{region_id}/history/`. Requests are sent in sub-groups with a 500 ms gap between bursts to avoid ESI rate limits; if the `X-Esi-Error-Limit-Remain` header drops below 10, remaining items are skipped and a 60-second backoff is triggered. Results are upserted into `ett_market_history`. Rens and Hek share the Heimatar region (`10000030`) and are deduplicated — the region is fetched once and the result written under both hub keys.
 
 ---
 
@@ -124,7 +132,7 @@ Fetches 30-day rolling average daily volume per type per region using parallel `
 |---|---|---|---|
 | Max pages per tick | 5 | 1–50 | ESI pages processed per cron tick or browser step |
 | Max seconds per tick | 25 | 1–25 | Wall-clock time budget per tick |
-| History batch size | 15 | 1–50 | Type IDs fetched in parallel per history tick |
+| History fetch concurrency | 5 | 1–20 | Type IDs fetched in parallel per history tick |
 
 ---
 
@@ -174,13 +182,15 @@ This hook fires on the EVE Trade Tools admin page before tabs are rendered.
 | `ett_sso_client_id` / `ett_sso_client_secret` + IV/MAC | EVE SSO application credentials |
 | `ett_sso_access_token` / `ett_sso_refresh_token` + IV/MAC | SSO tokens (encrypted) |
 | `ett_sched_start_time` / `ett_sched_freq_hours` | Scheduler config |
+| `ett_sched_enabled` | Scheduler pause/resume state |
+| `ett_ph_runner_token` | System-cron secret token |
 | `ett_batch_max_pages` / `ett_batch_max_seconds` | Tick performance limits |
-| `ett_history_batch_size` | History parallel fetch batch size |
+| `ett_history_batch_size` | History parallel fetch concurrency |
 | `ett_ph_cron_prices_job_id` / `ett_ph_cron_history_job_id` | Active cron job IDs |
 
 ### On uninstall
 
-All WordPress options and cron events listed above are deleted. The external database and all price data within it are **never touched** by uninstall.
+All WordPress options listed above are deleted. The external database and all price data within it are **never touched** by uninstall.
 
 ---
 
@@ -192,7 +202,7 @@ Database password and SSO credentials are stored encrypted using AES-256-CBC wit
 
 ## Production Notes
 
-- Use a real system cron to trigger `wp-cron.php` rather than relying on site traffic
+- Configure an external cron service to ping `/?ett_ph_run=TOKEN` every minute — the URL and token are shown in the Schedule tab
 - The external database should be dedicated to ETT data — the plugin does not modify or clean up external DB tables on uninstall
 - Re-run the Fuzzwork import after each new Fuzzwork static data dump is published
 - Re-run Generate TypeIDs after changing market group selection or after a Fuzzwork import
