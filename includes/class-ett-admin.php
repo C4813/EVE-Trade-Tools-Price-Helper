@@ -44,6 +44,7 @@ class ETT_Admin {
 	const OPT_LAST_PRICE_RUN   = 'ett_last_price_run_completed_at';
 	const OPT_SCHED_START_TIME = 'ett_sched_start_time';
 	const OPT_SCHED_FREQ_HOURS = 'ett_sched_freq_hours';
+	const OPT_SCHED_ENABLED    = 'ett_sched_enabled';
 
 	const OPT_BATCH_MAX_PAGES   = 'ett_batch_max_pages';
 	const OPT_BATCH_MAX_SECONDS = 'ett_batch_max_seconds';
@@ -125,9 +126,10 @@ class ETT_Admin {
 		add_action('wp_ajax_ett_save_hubs_ajax', [__CLASS__, 'ajax_save_hubs']);
 		add_action('wp_ajax_ett_save_db_ajax', [__CLASS__, 'ajax_save_db']);
         add_action('wp_ajax_ett_save_schedule_ajax', [__CLASS__, 'ajax_save_schedule']);
-        add_action('wp_ajax_ett_next_run_ajax', [__CLASS__, 'ajax_next_run']);
         add_action('wp_ajax_ett_last_price_run_ajax', [__CLASS__, 'ajax_last_price_run']);
+        add_action('wp_ajax_ett_next_run_ajax', [__CLASS__, 'ajax_next_run']);
         add_action('wp_ajax_ett_cancel_schedule_ajax', [__CLASS__, 'ajax_cancel_schedule']);
+        add_action('wp_ajax_ett_clear_history_ajax',   [__CLASS__, 'ajax_clear_history']);
 		add_action('admin_post_ett_save_sso', [__CLASS__, 'handle_save_sso']);
 		add_action('wp_ajax_ett_save_sso_ajax', [__CLASS__, 'ajax_save_sso']);
 		add_action('admin_post_ett_sso_start', [__CLASS__, 'handle_sso_start']);
@@ -284,67 +286,56 @@ class ETT_Admin {
     	]);
     }
 
-    private static function format_next_run_txt(int $ts, string $tz) : string {
-    	if ($ts <= 0) return 'Not scheduled';
-    	try {
-    		$dt = new DateTime('@' . $ts);
-    		$dt->setTimezone(wp_timezone());
-    		return $dt->format('Y-m-d H:i:s') . " ({$tz})";
-    	} catch (Exception $e) {
-    		return gmdate('Y-m-d H:i:s', $ts) . " ({$tz})";
-    	}
+    public static function ajax_save_schedule() {
+        if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+        check_ajax_referer('ett_admin');
+        self::save_schedule_from_request($_POST);
+        wp_send_json_success(['saved' => true]);
     }
 
-    public static function ajax_save_schedule(){
-    	if (!current_user_can(self::CAP)){
-    		wp_send_json_error('Insufficient permissions', 403);
-    	}
-    	check_ajax_referer('ett_admin');
-    
-    	self::save_schedule_from_request($_POST);
-    
-    	ETT_Jobs::reschedule_prices_start();
-    
-    	$tz = wp_timezone_string();
-		$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
-    	$next_txt = self::format_next_run_txt((int)$next_ts, $tz);
-    
-    	wp_send_json_success([
-    		'saved'    => true,
-    		'next_txt' => $next_txt,
-    	]);
+    public static function ajax_cancel_schedule() {
+        if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+        check_ajax_referer('ett_admin');
+        $enabled = (bool) absint( wp_unslash( $_POST['enabled'] ?? '1' ) );
+        update_option(self::OPT_SCHED_ENABLED, $enabled ? '1' : '0', false);
+        wp_send_json_success(['enabled' => $enabled]);
     }
 
-    public static function ajax_cancel_schedule(){
-    	if (!current_user_can(self::CAP)){
-    		wp_send_json_error('Insufficient permissions', 403);
-    	}
-    	check_ajax_referer('ett_admin');
-    
-    	ETT_Jobs::cancel_prices_schedule();
-    
-    	wp_send_json_success([
-    		'cancelled' => true,
-    		'next_txt'  => 'Not scheduled',
-    	]);
+    public static function ajax_clear_history() {
+        if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+        check_ajax_referer('ett_admin');
+        try {
+            $pdo = ETT_ExternalDB::pdo();
+            $pdo->exec("DELETE FROM ett_jobs WHERE status IN ('done','error','cancelled')");
+            wp_send_json_success(['cleared' => true]);
+        } catch (\Throwable $e) {
+            wp_send_json_error('Failed: ' . $e->getMessage());
+        }
     }
 
-    public static function ajax_next_run(){
-    	if (!current_user_can(self::CAP)){
-    		wp_send_json_error('Insufficient permissions', 403);
-    	}
-    	check_ajax_referer('ett_admin');
-    
-    	$tz = wp_timezone_string();
-		$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
-    	$next_txt = self::format_next_run_txt((int)$next_ts, $tz);
-    
-    	wp_send_json_success([
-    		'next_txt' => $next_txt,
-    	]);
+    public static function ajax_next_run() {
+        if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+        check_ajax_referer('ett_admin');
+
+        $debug = ETT_Runner::get_due_debug();
+        $enabled = get_option(self::OPT_SCHED_ENABLED, '1') !== '0';
+
+        if (!$enabled) {
+            $next_txt = 'Schedule paused';
+        } elseif (!empty($debug['next_slot'])) {
+            $next_txt = $debug['next_slot'];
+        } else {
+            $next_txt = 'Unknown';
+        }
+
+        wp_send_json_success([
+            'next_txt' => $next_txt,
+            'debug'    => $debug,
+            'enabled'  => $enabled,
+        ]);
     }
 
-    public static function ajax_last_price_run(){
+	public static function ajax_last_price_run(){
     	if (!current_user_can(self::CAP)){
     		wp_send_json_error('Insufficient permissions', 403);
     	}
@@ -513,6 +504,7 @@ class ETT_Admin {
 		$import_meta       = get_option(self::OPT_LAST_IMPORT, []);
 		$sched_start_time  = get_option(self::OPT_SCHED_START_TIME, '03:00');
 		$sched_freq_hours  = (int)get_option(self::OPT_SCHED_FREQ_HOURS, 24);
+		$sched_enabled     = get_option(self::OPT_SCHED_ENABLED, '1') !== '0';
 
 		$batch_max_pages   = (int)get_option(self::OPT_BATCH_MAX_PAGES, 5);
 		$batch_max_seconds = (int)get_option(self::OPT_BATCH_MAX_SECONDS, 10);
@@ -1114,8 +1106,8 @@ class ETT_Admin {
 					<pre class="ett-json" id="ett-progress-json">{}</pre>
 
 					<div class="ett-warning ett-hidden" id="ett-stalled">
-					Heartbeat has not updated recently — job may be stalled (PHP timeout, network issue, or rate limiting).
-				</div>
+						<span id="ett-stalled-text"></span>
+					</div>
 			</div>
 
 			<div class="ett-progress ett-mt-10" id="ett-history-progress" style="display:none;">
@@ -1155,29 +1147,19 @@ class ETT_Admin {
 				<h2>Schedule</h2>
 				<p>Automatic runs use the site timezone: <strong><?php echo esc_html($tz); ?></strong></p>
 
+				<?php if (!empty($_GET['sched_saved'])): // phpcs:ignore WordPress.Security.NonceVerification.Recommended ?>
+				<div class="notice notice-success inline"><p><strong>Saved.</strong> Schedule updated.</p></div>
+				<?php endif; ?>
+
 				<?php
-		$next_ts  = ETT_Jobs::next_scheduled_timestamp('ett_ph_prices_scheduled_start');
-    	$next_txt = self::format_next_run_txt((int)$next_ts, $tz);
+				$runner_token = ETT_Runner::get_or_create_token();
+				$site_url     = trailingslashit(home_url());
+				$curl_cmd     = 'curl -s "' . $site_url . '?ett_ph_run=' . $runner_token . '"';
+				$wp_path      = ABSPATH;
+				$cli_cmd      = 'wp --path=' . escapeshellarg(rtrim($wp_path, '/')) . ' ett-prices run --quiet';
 				?>
 
-                <p><strong>Next scheduled run:</strong> <span id="ett-next-run"><?php echo esc_html($next_txt); ?></span></p>
-				<p><i>Scheduled runs rely on WP-Cron, which is triggered by website traffic. If you are overshooting a scheduled run, or runs are taking several hours, use <a href="https://cron-job.org">https://cron-job.org</a> to simulate traffic and to keep the process ticking over.</i></p>
-
-				<?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice flag
-					if (!empty($_GET['sched_saved'])): ?>
-					<div class="notice notice-success"><p><strong>Saved:</strong> Schedule updated.</p></div>
-				<?php endif; ?>
-
-				<?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice flag
-					if (!empty($_GET['sched_cancelled'])): ?>
-					<div class="notice notice-warning"><p><strong>Cancelled:</strong> Automatic schedule disabled. (You can re-enable by saving a schedule again.)</p></div>
-				<?php endif; ?>
-
-				<div id="ett-sched-rate-warning" class="ett-sched-warning ett-hidden">
-					<strong>Warning:</strong> Running every 1–2 hours may trigger ESI rate limiting. It is recommended to use 4 hours or more unless you understand the load implications.
-				</div>
-
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="ett-sched-form">
+				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="ett-sched-form">
 					<?php wp_nonce_field('ett_save_schedule'); ?>
 					<input type="hidden" name="action" value="ett_save_schedule"/>
 
@@ -1193,7 +1175,6 @@ class ETT_Admin {
 							$options = [1,2,3,4,6,8,12,24,48,72,168];
 							if (!in_array($sched_freq_hours, $options, true)) $options[] = $sched_freq_hours;
 							sort($options);
-
 							foreach ($options as $h){
 								echo '<option value="' . esc_attr($h) . '" ' . selected($sched_freq_hours, $h, false) . '>' . esc_html($h) . '</option>';
 							}
@@ -1201,54 +1182,209 @@ class ETT_Admin {
 						</select>
 					</div>
 
-                    <details id="ett-history-details" class="ett-details">
-                        <summary class="ett-summary">Run history</summary>
+					<div id="ett-sched-rate-warning" class="ett-sched-warning ett-hidden">
+						<strong>Warning:</strong> Running every 1–2 hours may trigger ESI rate limiting. It is recommended to use 4 hours or more unless you understand the load implications.
+					</div>
 
-						<div id="ett-run-history" class="ett-history-wrap">
-							<?php if (!$job_history && !$job_history_err): ?>
-								<p class="description">No price runs found yet.</p>
-							<?php elseif ($job_history_err): ?>
-								<p class="description">Unable to load history: <?php echo esc_html($job_history_err); ?></p>
-							<?php else: ?>
-								<table class="widefat striped ett-history-table">
-									<thead>
-										<tr>
-											<th>Started</th>
-											<th>Finished</th>
-											<th>Status</th>
-											<th>Driver</th>
-											<th>Last message</th>
-											<th>Error</th>
-										</tr>
-									</thead>
-									<tbody>
-										<?php foreach ($job_history as $row):
-											$prog = [];
-											try { $prog = json_decode($row['progress_json'] ?? '', true) ?: []; } catch (Exception $e){}
-											$driver   = $prog['driver'] ?? 'browser';
-											$last_msg = $prog['last_msg'] ?? '';
-											?>
-											<tr>
-												<td><?php echo esc_html(($row['started_at'] ?? '') . " ({$tz})"); ?></td>
-												<td><?php echo esc_html(($row['finished_at'] ?? '') . " ({$tz})"); ?></td>
-												<td><?php echo esc_html($row['status'] ?? ''); ?></td>
-												<td><?php echo esc_html($driver); ?></td>
-												<td><?php echo esc_html($last_msg); ?></td>
-												<td><?php echo esc_html($row['last_error'] ?? ''); ?></td>
-											</tr>
-										<?php endforeach; ?>
-									</tbody>
-								</table>
-							<?php endif; ?>
-						</div>
-					</details>
+					<div class="ett-row" style="margin-top:8px">
+						<label>Next scheduled run</label>
+						<span id="ett-next-run" style="font-size:13px;color:#50575e"><?php
+							$_due_debug = ETT_Runner::get_due_debug();
+							echo esc_html($sched_enabled ? ($_due_debug['next_slot'] ?? 'Unknown') : 'Schedule paused');
+						?></span>
+					</div>
 
-					<?php submit_button('Save Schedule', 'primary', 'submit', false); ?>
-					<?php submit_button('Cancel Schedule', 'secondary', 'cancel_schedule', false); ?>
+					<h3>Cron setup</h3>
+					<p>The schedule requires an external cron service pinging the endpoint below every minute. The Start time and Run every settings above control when a run actually kicks off — the pings just keep an active run moving and check whether a new one is due.</p>
+
+					<table class="form-table" style="margin-top:0">
+						<tr>
+							<th style="width:180px">Option A — HTTP<br><small style="font-weight:normal">(any host, no SSH)</small></th>
+							<td>
+								<div style="display:flex;align-items:center;gap:8px">
+									<code id="ett-curl-cmd" style="display:block;flex:1;background:#f6f6f6;padding:8px 10px;border:1px solid #ddd;border-radius:4px;word-break:break-all"><?php echo esc_html($curl_cmd); ?></code>
+									<button type="button" class="button button-small ett-copy-btn" data-target="ett-curl-cmd">Copy</button>
+								</div>
+								<p class="description" style="margin-top:6px">Set your cron service to call this URL every minute. Each request works for the full PHP execution window before saving state, so a 10–20 minute run completes across only a handful of pings.</p>
+							</td>
+						</tr>
+						<tr>
+							<th>Option B — WP-CLI<br><small style="font-weight:normal">(requires SSH)</small></th>
+							<td>
+								<div style="display:flex;align-items:center;gap:8px">
+									<code id="ett-cli-cmd" style="display:block;flex:1;background:#f6f6f6;padding:8px 10px;border:1px solid #ddd;border-radius:4px;word-break:break-all"><?php echo esc_html($cli_cmd); ?></code>
+									<button type="button" class="button button-small ett-copy-btn" data-target="ett-cli-cmd">Copy</button>
+								</div>
+								<p class="description" style="margin-top:6px">Runs entirely in PHP-CLI with no HTTP overhead. Set your server crontab to <code>* * * * *</code>. Adjust <code>wp</code> to the full path of your WP-CLI binary if needed.</p>
+							</td>
+						</tr>
+						<tr>
+							<th>HTTP token</th>
+							<td>
+								<div style="display:flex;align-items:center;gap:8px">
+									<code id="ett-runner-token" style="letter-spacing:.05em"><?php echo esc_html($runner_token); ?></code>
+									<button type="button" class="button button-small" id="ett-regen-token">Regenerate</button>
+								</div>
+								<p class="description" style="margin-top:4px">Regenerating invalidates the old token immediately — update your cron URL afterwards.</p>
+							</td>
+						</tr>
+					</table>
+
+					<div style="margin-top:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+						<?php submit_button('Save Schedule', 'primary', 'submit', false, ['style' => 'margin:0']); ?>
+						<button type="button" id="ett-cancel-schedule-btn" class="button <?php echo $sched_enabled ? 'button-secondary' : 'button-primary'; ?>" style="margin:0">
+							<?php echo $sched_enabled ? 'Pause Schedule' : 'Resume Schedule'; ?>
+						</button>
+					</div>
 				</form>
+				<script>
+				(function(){
+					var cancelBtn = document.getElementById('ett-cancel-schedule-btn');
+					var enabled = <?php echo $sched_enabled ? 'true' : 'false'; ?>;
+					if (cancelBtn) {
+						cancelBtn.addEventListener('click', function() {
+							var newEnabled = !enabled;
+							var label = newEnabled ? 'Resuming…' : 'Pausing…';
+							cancelBtn.disabled = true;
+							cancelBtn.textContent = label;
+							var nonce = <?php echo wp_json_encode(wp_create_nonce('ett_admin')); ?>;
+							fetch(ajaxurl, {
+								method: 'POST',
+								headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+								body: 'action=ett_cancel_schedule_ajax&_ajax_nonce=' + encodeURIComponent(nonce) + '&enabled=' + (newEnabled ? '1' : '0')
+							}).then(function(r){ return r.json(); }).then(function(data){
+								if (data.success) {
+									enabled = newEnabled;
+									cancelBtn.textContent = enabled ? 'Pause Schedule' : 'Resume Schedule';
+									cancelBtn.className = 'button ' + (enabled ? 'button-secondary' : 'button-primary');
+									if (typeof refreshNextRun === 'function') refreshNextRun();
+								}
+								cancelBtn.disabled = false;
+							}).catch(function(){ cancelBtn.disabled = false; cancelBtn.textContent = enabled ? 'Pause Schedule' : 'Resume Schedule'; });
+						});
+					}
+				})();
+				</script>
+
+				<script>
+				(function(){
+					// Copy buttons
+					document.querySelectorAll('.ett-copy-btn').forEach(function(btn){
+						btn.addEventListener('click', function(){
+							var target = document.getElementById(this.dataset.target);
+							if (!target) return;
+							var text = target.textContent.trim();
+							if (navigator.clipboard && navigator.clipboard.writeText) {
+								navigator.clipboard.writeText(text);
+							} else {
+								var r = document.createRange();
+								r.selectNode(target);
+								window.getSelection().removeAllRanges();
+								window.getSelection().addRange(r);
+								document.execCommand('copy');
+								window.getSelection().removeAllRanges();
+							}
+							var orig = this.textContent;
+							this.textContent = 'Copied!';
+							var b = this;
+							setTimeout(function(){ b.textContent = orig; }, 1500);
+						});
+					});
+
+					// Regenerate token
+					var regenBtn = document.getElementById('ett-regen-token');
+					if (regenBtn) {
+						regenBtn.addEventListener('click', function(){
+							if (!confirm('Regenerate the HTTP token?\n\nYour existing cron URL will stop working until you update it.')) return;
+							var btn = this;
+							btn.disabled = true;
+							btn.textContent = 'Regenerating\u2026';
+							var nonce = <?php echo wp_json_encode(wp_create_nonce('ett_admin')); ?>;
+							var base  = <?php echo wp_json_encode(trailingslashit(home_url())); ?>;
+							fetch(ajaxurl, {
+								method: 'POST',
+								headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+								body: 'action=ett_runner_regen_token&_ajax_nonce=' + encodeURIComponent(nonce)
+							})
+							.then(function(r){ return r.json(); })
+							.then(function(data){
+								if (data.success && data.data && data.data.token) {
+									var tok = data.data.token;
+									var tokenEl = document.getElementById('ett-runner-token');
+									var curlEl  = document.getElementById('ett-curl-cmd');
+									if (tokenEl) tokenEl.textContent = tok;
+									if (curlEl)  curlEl.textContent  = 'curl -s "' + base + '?ett_ph_run=' + tok + '"';
+								}
+								btn.disabled = false;
+								btn.textContent = 'Regenerate';
+							})
+							.catch(function(){
+								btn.disabled = false;
+								btn.textContent = 'Regenerate';
+							});
+						});
+					}
+				})();
+				</script>
 			</div>
+				<div class="ett-card" style="margin-top:16px">
+					<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+						<h3 style="margin:0">Run History</h3>
+						<button type="button" id="ett-clear-history-btn" class="button button-secondary button-small">Clear History</button>
+					</div>
+					<div id="ett-run-history" class="ett-history-wrap">
+						<?php if (!$job_history && !$job_history_err): ?>
+							<p class="description">No runs found yet.</p>
+						<?php elseif ($job_history_err): ?>
+							<p class="description">Unable to load history: <?php echo esc_html($job_history_err); ?></p>
+						<?php else: ?>
+							<table class="widefat striped ett-history-table">
+								<thead><tr>
+									<th>Type</th><th>Started</th><th>Finished</th><th>Status</th><th>Driver</th><th>Last message</th>
+								</tr></thead>
+								<tbody>
+								<?php foreach ($job_history as $row):
+									$prog = [];
+									try { $prog = json_decode($row['progress_json'] ?? '', true) ?: []; } catch (Exception $e){}
+									$driver_raw  = $prog['driver'] ?? 'browser';
+									$driver_lbl  = $driver_raw === 'browser' ? 'Manual' : 'Scheduled';
+									$type_lbl    = ($row['job_type'] ?? 'prices') === 'history' ? 'History fetch' : 'Price run';
+									$msg         = !empty($row['last_error']) ? $row['last_error'] : ($prog['last_msg'] ?? '');
+									$finished    = !empty($row['finished_at']) ? esc_html($row['finished_at'] . " ({$tz})") : '&mdash;';
+								?>
+								<tr>
+									<td><?php echo esc_html($type_lbl); ?></td>
+									<td><?php echo esc_html(($row['started_at'] ?? '') . " ({$tz})"); ?></td>
+									<td><?php echo $finished; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pre-escaped at assignment, may contain safe &mdash; entity ?></td>
+									<td><?php echo esc_html($row['status'] ?? ''); ?></td>
+									<td><?php echo esc_html($driver_lbl); ?></td>
+									<td><?php echo esc_html($msg); ?></td>
+								</tr>
+								<?php endforeach; ?>
+								</tbody>
+							</table>
+						<?php endif; ?>
+					</div>
+				</div>
+				<script>(function(){
+					var clearBtn = document.getElementById('ett-clear-history-btn');
+					if (clearBtn) {
+						clearBtn.addEventListener('click', function() {
+							if (!confirm('Clear all completed run history? This cannot be undone.')) return;
+							clearBtn.disabled = true; clearBtn.textContent = 'Clearing…';
+							var nonce = <?php echo wp_json_encode(wp_create_nonce('ett_admin')); ?>;
+							fetch(ajaxurl, { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+								body:'action=ett_clear_history_ajax&_ajax_nonce='+encodeURIComponent(nonce)
+							}).then(function(r){return r.json();}).then(function(data){
+								if (data.success) document.getElementById('ett-run-history').innerHTML = '<p class="description">No runs found yet.</p>';
+								clearBtn.disabled = false; clearBtn.textContent = 'Clear History';
+							}).catch(function(){ clearBtn.disabled = false; clearBtn.textContent = 'Clear History'; });
+						});
+					}
+				})();</script>
+
 			</div><!-- /.ett-tab-panel -->
-			<?php endif; ?>
+			<?php endif; // price-helper tab ?>
 
 			<?php foreach (self::$tabs as $tab): ?>
 			<?php if ($active_tab === $tab['slug']): ?>
@@ -1358,27 +1494,16 @@ class ETT_Admin {
 		exit;
 	}
 
-    public static function handle_save_schedule(){
-    	if (!current_user_can(self::CAP)) wp_die('Insufficient permissions.');
-    	check_admin_referer('ett_save_schedule');
-    
-    	if (isset($_POST['cancel_schedule'])){
-    		ETT_Jobs::cancel_prices_schedule();
-    		$url = add_query_arg(['page' => self::SLUG, 'sched_cancelled' => 1], admin_url('admin.php'));
-            wp_safe_redirect($url);
-    		exit;
-    	}
-    
-    	self::save_schedule_from_request($_POST);
-    
-    	// The schedule form includes these fields too, so keep saving them here.
-    	self::save_perf_from_request($_POST);
-    
-    	ETT_Jobs::reschedule_prices_start();
-    
-    	$url = add_query_arg(['page' => self::SLUG, 'sched_saved' => 1], admin_url('admin.php'));
+    public static function handle_save_schedule() {
+        if (!current_user_can(self::CAP)) wp_die('Insufficient permissions.');
+        check_admin_referer('ett_save_schedule');
+
+        self::save_schedule_from_request($_POST);
+        self::save_perf_from_request($_POST);
+
+        $url = add_query_arg(['page' => self::SLUG, 'sched_saved' => 1], admin_url('admin.php'));
         wp_safe_redirect($url);
-    	exit;
+        exit;
     }
 
     public static function handle_save_perf(){
@@ -1433,9 +1558,9 @@ class ETT_Admin {
     	update_option(self::OPT_BATCH_MAX_PAGES, $batch_max_pages, false);
     	update_option(self::OPT_BATCH_MAX_SECONDS, $batch_max_seconds, false);
 
-    	$history_batch_size = (int) wp_unslash($src['history_batch_size'] ?? 15);
+    	$history_batch_size = (int) wp_unslash($src['history_batch_size'] ?? 5);
     	if ($history_batch_size < 1)  $history_batch_size = 1;
-    	if ($history_batch_size > 50) $history_batch_size = 50;
+    	if ($history_batch_size > 20) $history_batch_size = 20;
     	update_option(self::OPT_HISTORY_BATCH_SIZE, $history_batch_size, false);
     
     	return [$batch_max_pages, $batch_max_seconds];
@@ -1695,7 +1820,8 @@ class ETT_Admin {
 	}
 
 	public static function get_access_token_for_jobs() : array{
-		if (!(is_admin() || (defined('DOING_CRON') && DOING_CRON) || (defined('WP_CLI') && WP_CLI))){
+		$is_system_cron = isset($_REQUEST['ett_ph_run']); // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- cron trigger token verified separately via get_access_token_for_jobs()
+		if (!(is_admin() || (defined('DOING_CRON') && DOING_CRON) || (defined('WP_CLI') && WP_CLI) || $is_system_cron)){
 			return ['ok' => false, 'error' => 'forbidden_context'];
 		}
 		return self::ensure_access_token();
