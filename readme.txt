@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.5.0
+Stable tag: 1.5.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -51,6 +51,20 @@ No. All functionality is restricted to the WordPress admin area.
 No. As of 1.5.0, scheduled runs use an external system cron pinging a token-authenticated HTTP endpoint every minute. WP-Cron is no longer used. The Schedule tab shows the curl command and optional WP-CLI command to configure your cron service.
 
 == Changelog ==
+
+= 1.5.1 =
+* Performance: History fetch default concurrency raised from 5 to 20; maximum raised to 50. Users who had never explicitly saved the concurrency setting were running at the original slow rate of 5 regardless of the cap changes in 1.5.0.
+* Performance: History fetch sub-group overhead eliminated — all items in a batch now fire in a single curl_multi call with no inter-group sleep gaps.
+* Added: Run Prices button — runs prices only, does not auto-start a history fetch on completion.
+* Added: Run History button — runs history fetch independently of a price run.
+* Changed: Former "Run Prices" button renamed to "Run All" (behaviour unchanged — prices followed by automatic history fetch).
+* Added: Concurrency KPI tile in the history fetch progress panel showing the active concurrency value in use.
+* Added: ESI status indicator in the history fetch progress panel, mirroring the indicator on the prices panel. Appears above the heartbeat indicator.
+* Fixed: Heartbeat indicator on the prices panel stuck on "Waiting for heartbeat" despite the job actively stepping. Root cause was a server/browser timezone mismatch — heartbeat_at is returned as a WordPress local-time MySQL timestamp with no timezone suffix, which new Date() parsed as browser local time, making the staleness delta incorrect. Receipt time is now recorded locally in the browser at the moment the response arrives.
+* Fixed: Same timezone-mismatch fix applied to the history fetch heartbeat indicator.
+* Fixed: "Waiting for heartbeat" shown immediately for cron-driven jobs even on a fresh heartbeat due to an erroneous observeOnly guard on the 15-second green threshold.
+* Fixed: Cancelling a history fetch restarted it. Redundant create_job('history') calls in the runner duplicated the job that finish_job() already creates; the idle-attach watcher picked up the second queued job immediately after cancel.
+* Misc: Removed empty activation and deactivation hook stubs from the main plugin file.
 
 = 1.5.0 =
 * Changed: WP-Cron removed entirely as the scheduling mechanism. Scheduled runs are now driven by an external cron service (e.g. Hostinger cPanel, crontab) pinging a token-authenticated HTTP endpoint (`/?ett_ph_run=TOKEN`) every minute. Each ping works for the full PHP execution window before saving state, so a 10–20 minute run completes across a handful of pings with no timeout risk.
