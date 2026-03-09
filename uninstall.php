@@ -81,6 +81,10 @@ $options = [
     'ett_last_price_run_completed_at',
     'ett_sched_start_time',
     'ett_sched_freq_hours',
+    'ett_sched_enabled',
+
+    // System-cron secret token (added v1.5.0)
+    'ett_ph_runner_token',
 
     // Cron state
     'ett_ph_cron_prices_job_id',
