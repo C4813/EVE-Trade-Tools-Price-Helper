@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.4.4
+Stable tag: 1.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -48,9 +48,26 @@ No. Uninstall removes WordPress-side options, transients, and scheduled cron hoo
 No. All functionality is restricted to the WordPress admin area.
 
 = Does this rely on WP-Cron? =
-Yes. Scheduled runs use WordPress cron. For production reliability, a real system cron triggering `wp-cron.php` is recommended.
+No. As of 1.5.0, scheduled runs use an external system cron pinging a token-authenticated HTTP endpoint every minute. WP-Cron is no longer used. The Schedule tab shows the curl command and optional WP-CLI command to configure your cron service.
 
 == Changelog ==
+
+= 1.5.0 =
+* Changed: WP-Cron removed entirely as the scheduling mechanism. Scheduled runs are now driven by an external cron service (e.g. Hostinger cPanel, crontab) pinging a token-authenticated HTTP endpoint (`/?ett_ph_run=TOKEN`) every minute. Each ping works for the full PHP execution window before saving state, so a 10–20 minute run completes across a handful of pings with no timeout risk.
+* Changed: Schedule card redesigned — flat layout with Start time, Run every, and a new Next scheduled run field. Cron setup section provides a ready-to-use curl command (Option A, any host) and a WP-CLI command (Option B, requires SSH) with copy buttons.
+* Added: Pause Schedule / Resume Schedule button on the Schedule card. When paused, no new price runs are triggered by incoming cron pings; any in-progress job completes normally. The Next scheduled run field updates immediately to reflect the paused state.
+* Added: Run History card below the Schedule card showing both Price runs and History fetch jobs. Columns: Type, Started, Finished, Status, Driver, Last message. Previously only price runs were listed, and the table was hidden inside a collapsible dropdown.
+* Added: Clear History button in the Run History card header. Removes all completed (done/error/cancelled) job records; active and queued jobs are unaffected.
+* Fixed: History fetch was skipping all secondary structures despite EVE SSO being authenticated. The access-token gate (`get_access_token_for_jobs()`) only permitted `is_admin()`, WP-Cron, and WP-CLI contexts — system-cron HTTP pings matched none of these, causing a silent `forbidden_context` fallback. The gate now also permits requests arriving via `?ett_ph_run=TOKEN`.
+* Fixed: PHP execution deadline calculated from `REQUEST_TIME` (arrival of HTTP request) rather than the current moment, causing the work loop to expire before doing any work on slow shared hosts where WordPress boot consumes several seconds of the time limit. Deadline is now calculated from `microtime(true)` using remaining budget.
+* Fixed: History fetch rate limiting caused by firing all parallel ESI requests simultaneously. `curl_multi_history()` now sends requests in sub-groups of up to `concurrency` simultaneous connections with a 500 ms gap between sub-groups, and reads the `X-Esi-Error-Limit-Remain` response header — if the error budget drops below 10, remaining items in the batch are skipped and the 60-second backoff is triggered automatically.
+* Changed: History fetch concurrency default lowered from 15 to 5; maximum capped at 20. The setting now controls sub-group size (parallel connections per burst) rather than total batch size.
+* Fixed: Heartbeat stale warning fired after ~15 seconds for cron-driven jobs, which update only once per minute. Threshold is now 90 seconds for system-cron jobs (15 seconds for manual browser-driven jobs). Warning text for cron jobs now reads "Waiting for next cron ping — heartbeat updates once per minute." rather than implying a stall.
+* Fixed: History fetch progress panel flickered back to "Starting history fetch…" when re-attaching to an already-running job. `startHistoryJob()` now accepts and renders the existing progress immediately on attach.
+* Fixed: Cancel History required two clicks. The idle-attach watcher (polling every 1 s) would re-attach to the still-running DB job in the gap between `stopHistoryJob()` clearing `historyRunning` and the cancel AJAX landing on the server. The `historyCancelling` flag is now held for 1.5 s after the AJAX resolves, blocking spurious re-attachment.
+* Fixed: Deadlock (MySQL error 1213) when two overlapping cron pings both tried to write to the same job row simultaneously. A concurrent-ping guard now bails out immediately if a heartbeat was written within the last 30 seconds, and `update_status()`, `heartbeat()`, and `finish_job()` retry up to 3 times with exponential back-off on SQLSTATE 40001.
+* Fixed: `is_run_due()` ignored `start_time` after the first run, anchoring subsequent runs to `last_run + freq_hours` instead. Runs are now anchored to the configured start time regardless of when the previous run completed — with start_time 10:32 and freq 24 h, every run fires at 10:32 daily.
+* Fixed: Idle-attach watcher interval reduced from 5 s to 1 s; status poll interval reduced from 2 s to 1 s for faster UI attach on cron-driven jobs.
 
 = 1.4.4 =
 * Fixed: `Domain Path` header in the plugin file referenced a `languages/` directory that did not exist, producing a validation warning. The header has been removed as the plugin does not include any translation files.
@@ -125,6 +142,9 @@ Yes. Scheduled runs use WordPress cron. For production reliability, a real syste
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.5.0 =
+WP-Cron scheduling removed. After upgrading, configure an external cron service to ping the URL shown in the Schedule tab every minute — your existing schedule settings (start time, frequency) are preserved. No database schema changes. Safe to upgrade in place.
 
 = 1.4.4 =
 Housekeeping release. No database schema changes. Safe to upgrade in place.
