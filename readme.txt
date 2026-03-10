@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.6.0
+Stable tag: 1.6.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -51,6 +51,9 @@ No. All functionality is restricted to the WordPress admin area.
 No. As of 1.5.0, scheduled runs use an external system cron pinging a token-authenticated HTTP endpoint every minute. WP-Cron is no longer used. The Schedule tab shows the curl command and optional WP-CLI command to configure your cron service.
 
 == Changelog ==
+
+= 1.6.1 =
+* Internal: Template files moved from templates/price-helper/ to templates/.
 
 = 1.6.0 =
 * Changed: Action buttons renamed for clarity — "Run All" is now "Fetch All", "Run Prices" is now "Fetch Prices", and "Run History" is now "Fetch History". Descriptive tooltips added to each button.
@@ -163,6 +166,9 @@ No. As of 1.5.0, scheduled runs use an external system cron pinging a token-auth
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.6.1 =
+Housekeeping release. No database schema changes. No behaviour changes. Safe to upgrade in place.
 
 = 1.6.0 =
 Cosmetic and code-quality release. Action buttons renamed (Fetch All / Fetch Prices / Fetch History). No database schema changes. No behaviour changes. Safe to upgrade in place.
