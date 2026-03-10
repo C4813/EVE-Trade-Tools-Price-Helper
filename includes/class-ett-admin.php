@@ -440,16 +440,20 @@ class ETT_Admin {
 		$char_name = get_option(self::OPT_SSO_CHARACTER_NAME, '');
 		$cache_at  = (int)get_option(self::OPT_SSO_STRUCTURES_CACHE_AT, 0);
 
+		$sched_enabled = get_option(self::OPT_SCHED_ENABLED, '1') !== '0';
+
 		wp_localize_script('ett-admin', 'ETT_ADMIN', [
-			'ajax_url'                   => admin_url('admin-ajax.php'),
-			'nonce'                      => wp_create_nonce('ett_admin'),
-			'last_price_run_completed_at'=> $last,
-			'wp_timezone_string'         => $tz,
-			'sso_authed'                 => $sso_authed,
-			'sso_character_name'         => $char_name,
-			'sso_cache_at'               => $cache_at,
-			'secondary_pairs'            => self::secondary_pairs(),
+			'ajax_url'                        => admin_url('admin-ajax.php'),
+			'nonce'                           => wp_create_nonce('ett_admin'),
+			'last_price_run_completed_at'     => $last,
+			'wp_timezone_string'              => $tz,
+			'sso_authed'                      => $sso_authed,
+			'sso_character_name'              => $char_name,
+			'sso_cache_at'                    => $cache_at,
+			'secondary_pairs'                 => self::secondary_pairs(),
 			'last_price_run_completed_at_iso' => $last_iso,
+			'sched_enabled'                   => $sched_enabled,
+			'home_url'                        => trailingslashit(home_url()),
 		]);
 	}
 
@@ -566,6 +570,32 @@ class ETT_Admin {
 		$typeid_display = ($typeid_count !== null) ? number_format((int)$typeid_count) : '—';
 			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- tab routing param, not an action
 			$active_tab = sanitize_key(wp_unslash($_GET['tab'] ?? 'price-helper'));
+
+		// ── Pre-compute template variables ─────────────────────────────────────
+		// Fuzzwork import details
+		$last_import_txt = !empty($import_meta['imported_at']) ? (string)$import_meta['imported_at'] : 'Never';
+		$_fuzz_parts     = [];
+		foreach (['invMarketGroups','invTypes','invMetaGroups','invMetaTypes','industryActivityProducts','invTypeMaterials'] as $_k){
+			if (isset($import_meta[$_k])) $_fuzz_parts[] = $_k . ': ' . number_format((int)$import_meta[$_k]);
+		}
+		$details_txt = !empty($_fuzz_parts) ? implode(' | ', $_fuzz_parts) : '';
+
+		// Schedule
+		$runner_token     = ETT_Runner::get_or_create_token();
+		$_site_url        = trailingslashit(home_url());
+		$curl_cmd         = 'curl -s "' . $_site_url . '?ett_ph_run=' . $runner_token . '"';
+		$_wp_path         = ABSPATH;
+		$cli_cmd          = 'wp --path=' . escapeshellarg(rtrim($_wp_path, '/')) . ' ett-prices run --quiet';
+		$_due_debug       = ETT_Runner::get_due_debug();
+		$next_slot_display = $sched_enabled ? ($_due_debug['next_slot'] ?? 'Unknown') : 'Schedule paused';
+
+		// Actions card last run
+		$lastRun = get_option(self::OPT_LAST_PRICE_RUN, '');
+
+		// Market-group tree HTML (render_tree is private, so capture it here)
+		ob_start();
+		self::render_tree($tree, $selected_groups);
+		$market_tree_html = ob_get_clean();
 		?>
 		<div class="wrap ett-wrap">
 			<h1>EVE Trade Tools</h1>
@@ -585,810 +615,35 @@ class ETT_Admin {
 
 			<?php if ($active_tab === 'price-helper'): ?>
 			<div class="ett-tab-panel">
-			<div class="ett-grid">
-				<div class="ett-card">
-					<h2>External Database</h2>
 
-                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="ett-db-form">
-						<?php wp_nonce_field('ett_save_db'); ?>
-						<input type="hidden" name="action" value="ett_save_db"/>
-
-						<div class="ett-row">
-							<label>Host</label>
-							<input type="text" name="host" value="<?php echo esc_attr($db['host']); ?>"/>
-						</div>
-
-						<div class="ett-row">
-							<label>Port</label>
-							<input type="number" name="port" value="<?php echo esc_attr($db['port']); ?>"/>
-						</div>
-
-						<div class="ett-row">
-							<label>Database Name</label>
-							<input type="text" name="dbname" value="<?php echo esc_attr($db['dbname']); ?>"/>
-						</div>
-
-						<div class="ett-row">
-							<label>Database User Name</label>
-							<input type="text" name="user" value="<?php echo esc_attr($db['user']); ?>"/>
-						</div>
-
-						<div class="ett-row">
-							<label>Password</label>
-							<input type="password" name="pass" value="" placeholder="(leave blank to keep existing)"/>
-							<p class="description">Password is stored encrypted in wp_options. Leave blank to keep current.</p>
-						</div>
-
-						<?php submit_button('Save DB Settings', 'primary', 'submit', false); ?>
-					</form>
-
-                    <div class="ett-status">
-                    	<p><strong>Status:</strong>
-                    		<?php if (!$db_test): ?>
-                    			<span id="ett-db-status-text" class="ett-bad">Not configured.</span>
-                    		<?php else: ?>
-                    			<span id="ett-db-status-text" class="<?php echo esc_attr($db_test['ok'] ? 'ett-ok' : 'ett-bad'); ?>">
-                    				<?php echo esc_html($db_test['message']); ?>
-                    			</span>
-                    		<?php endif; ?>
-                    	</p>
-                    
-                    	<p><strong>Schema:</strong>
-                    		<span id="ett-db-schema-text" class="<?php echo esc_attr($schema_ok ? 'ett-ok' : 'ett-bad'); ?>">
-                    			<?php echo $schema_ok ? 'Ready' : 'Not ready'; ?>
-                    		</span>
-                    	</p>
-                    </div>
+				<div class="ett-grid">
+					<?php self::render_template('price-helper/card-db.php',
+						compact('db', 'db_test', 'schema_ok')); ?>
+					<?php self::render_template('price-helper/card-fuzzwork.php',
+						compact('import_meta', 'last_import_txt', 'details_txt', 'schema_ok')); ?>
 				</div>
 
-				<div class="ett-card">
-					<h2>Fuzzwork Import</h2>
-
-                    <?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice flag
-                    if (!empty($_GET['db_err'])): ?>
-                    	<div class="notice notice-error">
-                    		<p><strong>DB Error:</strong>
-                    			<?php
-                    			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice content
-                    			echo esc_html(sanitize_text_field(wp_unslash($_GET['db_err'])));
-                    			?>
-                    		</p>
-                    	</div>
-                    <?php endif; ?>
-                    
-                    <?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice flag
-                    if (!empty($_GET['err'])): ?>
-                    	<div class="notice notice-error">
-                    		<p><strong>Error:</strong>
-                    			<?php
-                    			// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice content
-                    			echo esc_html(sanitize_text_field(wp_unslash($_GET['err'])));
-                    			?>
-                    		</p>
-                    	</div>
-                    <?php endif; ?>
-
-					<p>Imports the following tables from Fuzzwork (<code>/dump/latest/</code>) into the external DB:</p>
-					<ul class="ett-list-disc">
-						<li><code>invMarketGroups</code></li>
-						<li><code>invTypes</code> (nodescription CSV)</li>
-						<li><code>invMetaGroups</code></li>
-						<li><code>invMetaTypes</code></li>
-						<li><code>industryActivityProducts</code> (blueprint activity outputs)</li>
-						<li><code>invTypeMaterials</code> (CSV bz2)</li>
-					</ul>
-
-					<p class="description">
-						This data is used to build market group selection, generate the typeID list, and persist
-						<code>meta_tier</code> (T1/Meta/T2/Faction/Deadspace/Officer/Other).
-					</p>
-
-					<p><i>
-						It is only necessary to run this once after plugin activation, and thereafter when
-						<a href="https://www.fuzzwork.co.uk/dump/latest/">fuzzwork.co.uk/dump/latest/</a> is updated.
-					</i></p>
-
-                    <?php
-                    $last_import_txt = !empty($import_meta['imported_at']) ? (string)$import_meta['imported_at'] : 'Never';
-                    
-                    $parts = [];
-                    foreach (['invMarketGroups','invTypes','invMetaGroups','invMetaTypes','industryActivityProducts','invTypeMaterials'] as $k){
-                    	if (isset($import_meta[$k])) $parts[] = $k . ': ' . number_format((int)$import_meta[$k]);
-                    }
-                    $details_txt = !empty($parts) ? implode(' | ', $parts) : '';
-                    ?>
-                    
-                    <p><strong>Last import:</strong> <span id="ett-last-import"><?php echo esc_html($last_import_txt); ?></span></p>
-                    
-                    <div class="ett-muted ett-mt-6<?php echo $details_txt ? '' : ' ett-hidden'; ?>" id="ett-last-import-details-wrap">
-                    	<p><strong>Last import details:</strong> <span id="ett-last-import-details"><?php echo esc_html($details_txt); ?></span></p>
-                    </div>
-
-					<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="ett-fuzzwork-form">
-						<?php wp_nonce_field('ett_import_fuzzwork'); ?>
-						<input type="hidden" name="action" value="ett_import_fuzzwork"/>
-						<?php submit_button('Import from Fuzzwork (latest)', 'secondary', 'submit', false); ?>
-					</form>
-				</div>
-			</div>
-
-			<div class="ett-grid">
-				<div class="ett-card">
-					<h2>EVE SSO</h2>
-
-					<div class="ett-muted ett-muted-block">
-						<p><strong>Create an EVE Developers application</strong></p>
-						<ol class="ett-list-decimal">
-							<li>Go to <a href="https://developers.eveonline.com">https://developers.eveonline.com</a> and log in.</li>
-							<li>Create a new application.</li>
-							<li>Set the application <strong>Callback URL</strong> to the value shown below (exact match required).</li>
-							<div class="ett-row">
-								<label>Callback URL <span class="ett-muted">(universal &mdash; handles all ETT plugins)</span></label>
-								<input type="text" readonly value="<?php echo esc_attr(self::unified_callback_url()); ?>" onclick="this.select();"/>
-							</div>
-							<li>Set the application <strong>Scopes</strong> to the following:</li>
-						</ol>
-
-						<p class="description ett-mt-8"><strong>Required by ETT Price Helper:</strong></p>
-						<ul class="ett-list-disc ett-tight">
-							<li><code>esi-universe.read_structures.v1</code></li>
-							<li><code>esi-markets.structure_markets.v1</code></li>
-							<li><code>esi-search.search_structures.v1</code></li>
-						</ul>
-
-						<p class="description ett-mt-8"><strong>Required by ETT Reprocess Trading</strong> (if installed):</p>
-						<ul class="ett-list-disc ett-tight">
-							<li><code>esi-skills.read_skills.v1</code></li>
-							<li><code>esi-characters.read_standings.v1</code></li>
-						</ul>
-
-						<p class="description ett-mt-8">
-							After creating the app, copy the Client ID and Secret into this page and click “Save SSO Settings”, then “Connect EVE SSO”.
-						</p>
-					</div>
-
-					<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="ett-sso-form">
-						<?php wp_nonce_field('ett_save_sso'); ?>
-						<input type="hidden" name="action" value="ett_save_sso"/>
-
-						<div class="ett-row">
-							<label>Client ID</label>
-							<input type="text" name="ett_sso_client_id" value="<?php echo esc_attr($client_id); ?>" placeholder="SSO application Client ID"/>
-						</div>
-
-						<div class="ett-row">
-							<label>Client Secret</label>
-							<input type="password" name="ett_sso_client_secret" value="" placeholder="<?php echo $client_secret !== '' ? '(saved — leave blank to keep)' : 'SSO application Secret Key'; ?>"/>
-						</div>
-
-						<?php submit_button('Save SSO Settings', 'secondary', 'submit', false); ?>
-					</form>
-
-					<div class="ett-mt-10">
-						<?php if ($sso_authed): ?>
-							<div class="ett-status ett-sso-status ett-ok">
-								<strong>Status:</strong>
-								Authenticated<?php echo $char_name ? ' as ' . esc_html($char_name) : ''; ?>.
-							</div>
-
-                        <div class="ett-actions ett-mt-10">
-                            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="ett-inline-form">
-                                <?php wp_nonce_field('ett_sso_disconnect'); ?>
-                                <input type="hidden" name="action" value="ett_sso_disconnect"/>
-                                <button type="submit" class="button">Disconnect</button>
-                            </form>
-                        </div>
-
-						<?php else: ?>
-							<div class="ett-status ett-sso-status ett-bad">
-								<strong>Status:</strong>
-								Not authenticated. Secondary Market dropdowns are disabled.
-							</div>
-
-							<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="ett-mt-10">
-								<?php wp_nonce_field('ett_sso_start'); ?>
-								<input type="hidden" name="action" value="ett_sso_start"/>
-                                <button id="ett-btn-sso-connect" type="submit" class="button button-primary" <?php disabled(empty($client_id) || empty($client_secret)); ?>>
-                                	Connect EVE SSO
-                                </button>
-								<?php if (empty($client_id) || empty($client_secret)): ?>
-									<p class="description" id="ett-sso-connect-help">Enter Client ID and Secret, save, then connect.</p>
-								<?php endif; ?>
-							</form>
-						<?php endif; ?>
-					</div>
+				<div class="ett-grid">
+					<?php self::render_template('price-helper/card-sso.php',
+						compact('client_id', 'client_secret', 'sso_authed', 'char_name', 'cache', 'cache_at')); ?>
+					<?php self::render_template('price-helper/card-market-groups.php',
+						compact('tree', 'selected_groups', 'schema_ok', 'typeid_display', 'market_tree_html')); ?>
 				</div>
 
-				<div class="ett-card">
-					<h2>Market Groups</h2>
-					<p>Select market groups to define which typeIDs will be generated.</p>
+				<?php self::render_template('price-helper/card-hubs.php',
+					compact('selected_hubs', 'secondary_structures', 'tertiary_structures',
+					        'sso_authed', 'cache', 'cache_at')); ?>
 
-					<div class="ett-warning-box">
-						<strong>Warning:</strong> Selecting a large number of market groups — especially all groups — can generate a very large typeID list and significantly increase database load and price run duration.
-						<br><br>
-						Only select the market groups you actually require.
-					</div>
+				<?php self::render_template('price-helper/card-actions.php',
+					compact('schema_ok', 'lastRun', 'tz',
+					        'batch_max_pages', 'batch_max_seconds', 'history_batch_size')); ?>
 
-					<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="ett-selection-form">
-						<?php wp_nonce_field('ett_save_selection'); ?>
-						<input type="hidden" name="action" value="ett_save_selection"/>
+				<?php self::render_template('price-helper/card-schedule.php',
+					compact('sched_start_time', 'sched_freq_hours', 'sched_enabled', 'tz',
+					        'runner_token', 'curl_cmd', 'cli_cmd', 'next_slot_display')); ?>
 
-						<div class="ett-grid">
-							<div>
-								<label><strong>Filter</strong></label>
-								<p class="ett-mt-6 ett-mb-0">
-									<input type="text" id="ett-mg-filter" placeholder="Type to filter market groups..."/>
-								</p>
-							</div>
-						</div>
-
-						<div class="ett-tree" id="ett-mg-tree">
-							<?php
-							if (!$schema_ok){
-								echo '<p class="ett-muted">Configure external DB + import Fuzzwork to load market groups.</p>';
-							} else {
-								self::render_tree($tree, $selected_groups);
-							}
-							?>
-						</div>
-
-						<?php
-						$btn_attrs = ['id' => 'ett-save-selection'];
-						if (empty($selected_groups)) $btn_attrs['disabled'] = 'disabled';
-						submit_button('Save Selection', 'primary', 'submit', false, $btn_attrs);
-						?>
-					</form>
-
-					<div class="ett-actions ett-mg-actions">
-						<button class="button button-secondary" id="ett-btn-generate" type="button" <?php disabled(!$schema_ok); ?>>Generate TypeIDs</button>
-					</div>
-
-					<p class="description ett-mt-8">
-						<strong>Generate TypeIDs</strong> saves a static list of typeIDs for the currently selected market groups.
-					</p>
-
-					<div class="ett-typeid-count">
-						<strong>Currently Stored TypeIDs:</strong>
-						<span id="ett-current-typeids"><?php echo esc_html($typeid_display); ?></span>
-					</div>
-				</div>
-			</div>
-
-			<div class="ett-card">
-				<h2>Trade Hubs</h2>
-				<p>Select trade hubs to call market data from.</p>
-				<p>Secondary/Tertiary Market dropdown is filtered to the paired system and requires SSO + refreshed structures.</p>
-				<p>Paired Systems: Jita/Perimeter, Amarr/Ashab, Rens/Frarn, Dodixie/Botane, Hek/Hek</p>
-				<p><i>If you cannot find the structure you are looking for, <b>the character you have authed with above requires docking access to that structure.</b></i></p>
-
-				<div class="ett-hub-row ett-hub-head">
-					<div class="ett-hub-check"><strong>Hub</strong></div>
-					<div class="ett-hub-secondary"><strong>Secondary Market</strong></div>
-					<div class="ett-hub-tertiary"><strong>Tertiary Market</strong></div>
-				</div>
-
-				<form method="post" action="#" id="ett-hubs-form">
-					<div class="ett-hubs">
-						<?php
-						$pairs = self::secondary_pairs();
-						foreach (self::hubs() as $key => $hub):
-							$is_checked        = in_array($key, $selected_hubs, true);
-							$selected_structure = isset($secondary_structures[$key]) ? (int)$secondary_structures[$key] : 0;
-							$selected_tertiary  = isset($tertiary_structures[$key]) ? (int)$tertiary_structures[$key] : 0;
-
-							$paired_system_id = isset($pairs[$key]['system_id']) ? (int)$pairs[$key]['system_id'] : 0;
-
-							$choices = [];
-							if ($paired_system_id && !empty($cache)){
-								foreach ($cache as $st){
-									if (!is_array($st)) continue;
-									if (empty($st['structure_id']) || empty($st['name']) || empty($st['solar_system_id'])) continue;
-									if ((int)$st['solar_system_id'] !== $paired_system_id) continue;
-									$choices[] = $st;
-								}
-							}
-
-							$disable_secondary = (!$is_checked) || (!$sso_authed) || empty($cache);
-							$disable_tertiary  = $disable_secondary;
-							?>
-							<div class="ett-hub-row">
-								<label class="ett-hub-check">
-									<input type="checkbox" name="ett_hubs[]" value="<?php echo esc_attr($key); ?>" <?php checked($is_checked); ?> />
-									<?php echo esc_html($hub['label']); ?>
-								</label>
-
-								<select name="ett_secondary_structure[<?php echo esc_attr($key); ?>]" class="ett-hub-secondary" <?php disabled($disable_secondary); ?>>
-									<option value="0" <?php selected($selected_structure, 0); ?>>
-										<?php
-										if (!$sso_authed) echo 'Authenticate to load structures';
-										else if (empty($cache)) echo 'Click “Refresh structures”';
-										else echo 'No secondary market';
-										?>
-									</option>
-
-									<?php foreach ($choices as $st):
-										$sid    = (int)$st['structure_id'];
-										$nm     = (string)$st['name'];
-										$ticker = isset($st['owner_ticker']) ? trim((string)$st['owner_ticker']) : '';
-										$owner  = isset($st['owner_name']) ? trim((string)$st['owner_name']) : '';
-
-										$suffix = '';
-										if ($ticker !== '' && $owner !== '') $suffix = ' — [' . $ticker . '] ' . $owner;
-										else if ($owner !== '') $suffix = ' — ' . $owner;
-
-										$label = $nm . $suffix;
-										?>
-										<option value="<?php echo esc_attr($sid); ?>" <?php selected($selected_structure, $sid); ?>>
-											<?php echo esc_html($label); ?>
-										</option>
-									<?php endforeach; ?>
-								</select>
-
-								<select name="ett_tertiary_structure[<?php echo esc_attr($key); ?>]" class="ett-hub-tertiary" <?php disabled($disable_tertiary); ?>>
-									<option value="0" <?php selected($selected_tertiary, 0); ?>>
-										<?php
-										if (!$sso_authed) echo 'Authenticate to load structures';
-										else if (empty($cache)) echo 'Click “Refresh structures”';
-										else echo 'No tertiary market';
-										?>
-									</option>
-
-									<?php foreach ($choices as $st):
-										$sid    = (int)$st['structure_id'];
-										$nm     = (string)$st['name'];
-										$ticker = isset($st['owner_ticker']) ? trim((string)$st['owner_ticker']) : '';
-										$owner  = isset($st['owner_name']) ? trim((string)$st['owner_name']) : '';
-
-										$suffix = '';
-										if ($ticker !== '' && $owner !== '') $suffix = ' — [' . $ticker . '] ' . $owner;
-										else if ($owner !== '') $suffix = ' — ' . $owner;
-
-										$label = $nm . $suffix;
-										?>
-										<option value="<?php echo esc_attr($sid); ?>" <?php selected($selected_tertiary, $sid); ?>>
-											<?php echo esc_html($label); ?>
-										</option>
-									<?php endforeach; ?>
-								</select>
-							</div>
-						<?php endforeach; ?>
-					</div>
-					
-                    <?php
-                    $refresh_disabled = !$sso_authed;
-                    ?>
-                    <div class="ett-actions ett-mt-10">
-                        <button type="button" class="button button-secondary" id="ett-btn-refresh-structures" <?php disabled($refresh_disabled); ?>>Refresh structures</button>
-                    </div>
-                    
-                    <p class="description" id="ett-structures-cache-meta">
-                        <?php
-                        if (!$sso_authed){
-                            echo 'Authenticate first to refresh structures.';
-                        } else if ($cache_at){
-                            echo 'Last refreshed: ' . esc_html(gmdate('Y-m-d H:i:s', $cache_at)) . ' UTC. Cached structures: ' . esc_html((string)count($cache)) . '.';
-                        } else {
-                            echo 'Structures have not been refreshed yet.';
-                        }
-                        ?>
-                    </p>
-
-					<?php submit_button('Save Trade Hubs', 'primary', 'submit', false, ['id' => 'ett-save-hubs']); ?>
-				</form>
-			</div>
-
-			<?php $lastRun = get_option(self::OPT_LAST_PRICE_RUN, ''); ?>
-			<div class="ett-card">
-				<h2>Actions</h2>
-
-				<p><strong>Run All</strong> pulls prices then automatically runs the history fetch. <strong>Run Prices</strong> pulls prices only. <strong>Run History</strong> runs the history fetch only.</p>
-
-				<?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice flag
-					if (!empty($_GET['perf_saved'])): ?>
-					<div class="notice notice-success">
-						<p><strong>Saved:</strong> Performance settings updated.</p>
-					</div>
-				<?php endif; ?>
-                
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="ett-perf-form">
-                    <?php wp_nonce_field('ett_perf', 'ett_perf_nonce'); ?>
-                    <input type="hidden" name="action" value="ett_save_perf"/>
-
-                    <details class="ett-details">
-                        <summary class="ett-summary">Advanced performance</summary>
-
-						<div class="ett-row ett-mt-10">
-							<label>Max pages per tick/call</label>
-							<input
-								type="number"
-								class="ett-sched-input"
-								name="batch_max_pages"
-								min="1"
-								max="50"
-								value="<?php echo esc_attr($batch_max_pages); ?>"
-							/>
-							<p class="description">Higher = faster, but increases timeout risk and ESI load. Start at 5–10.</p>
-						</div>
-
-						<div class="ett-row">
-							<label>Max seconds per tick/call</label>
-							<input
-								type="number"
-								class="ett-sched-input"
-								name="batch_max_seconds"
-								min="1"
-								max="25"
-								value="<?php echo esc_attr($batch_max_seconds); ?>"
-							/>
-							<p class="description">Time budget per tick/call. Keep conservative on shared hosting (8–12s).</p>
-						</div>
-
-						<div class="ett-row">
-							<label>History fetch concurrency</label>
-							<input
-								type="number"
-								class="ett-sched-input"
-								name="history_batch_size"
-								min="1"
-								max="50"
-								value="<?php echo esc_attr($history_batch_size); ?>"
-							/>
-							<p class="description">Number of parallel ESI requests per history step (1–50). Lower this if you are hitting rate limits during the history fetch. Default: 20.</p>
-						</div>
-
-						<p class="ett-mt-10">
-							<button type="submit" class="button button-secondary">Save performance settings</button>
-						</p>
-					</details>
-				</form>
-
-				<div class="ett-actions">
-					<button class="button button-primary" id="ett-btn-run" <?php disabled(!$schema_ok); ?>>Run All</button>
-					<button class="button button-secondary" id="ett-btn-run-prices" <?php disabled(!$schema_ok); ?>>Run Prices</button>
-					<button class="button button-secondary" id="ett-btn-run-history" <?php disabled(!$schema_ok); ?>>Run History</button>
-					<button class="button" id="ett-btn-cancel" disabled>Cancel</button>
-				</div>
-
-				<div class="ett-last-run">
-					<strong>Last price run completed:</strong>
-					<span id="ett-last-price-run">
-						<?php
-						if ($lastRun){
-							$tz2 = wp_timezone_string();
-							$tz2 = $tz2 ? $tz2 : 'UTC';
-							echo esc_html($lastRun . ' (' . $tz2 . ')');
-						} else {
-							echo 'Never';
-						}
-						?>
-					</span>
-				</div>
-
-				<div class="ett-confirm ett-hidden" id="ett-run-confirm">
-					<div class="ett-confirm-box">
-						<div class="ett-confirm-text" id="ett-run-confirm-text"></div>
-						<div class="ett-confirm-actions">
-							<button type="button" class="button button-primary" id="ett-run-confirm-yes">Yes</button>
-							<button type="button" class="button" id="ett-run-confirm-no">No</button>
-						</div>
-					</div>
-				</div>
-
-				<div class="ett-progress">
-					<div class="ett-progress-head">
-						<div>
-							<div class="ett-title">Job Progress</div>
-							<div class="ett-sub" id="ett-job-phase">Idle.</div>
-							<div class="ett-sub" id="ett-job-msg">Idle.</div>
-							<div class="ett-sub ett-hidden" id="ett-job-warn"></div>
-						</div>
-
-						<div class="ett-status-stack">
-							<div class="ett-heartbeat" id="ett-esi">
-								<span class="ett-dot"></span>
-								<span class="ett-hb-text" id="ett-esi-text">ESI: Checking...</span>
-							</div>
-							<div class="ett-heartbeat" id="ett-heartbeat">
-								<span class="ett-dot"></span>
-								<span class="ett-hb-text">No heartbeat</span>
-							</div>
-						</div>
-					</div>
-
-					<div class="ett-kpis">
-						<div class="ett-kpi"><div class="ett-k">Elapsed</div><div class="ett-v" id="ett-kpi-elapsed">—</div></div>
-						<div class="ett-kpi"><div class="ett-k">Hub</div><div class="ett-v" id="ett-kpi-hub">—</div></div>
-						<div class="ett-kpi"><div class="ett-k">Page</div><div class="ett-v" id="ett-kpi-page">—</div></div>
-						<div class="ett-kpi"><div class="ett-k">Orders Seen</div><div class="ett-v" id="ett-kpi-orders">—</div></div>
-						<div class="ett-kpi"><div class="ett-k">Matched Orders</div><div class="ett-v" id="ett-kpi-matched">—</div></div>
-						<div class="ett-kpi"><div class="ett-k">Rows Written</div><div class="ett-v" id="ett-kpi-written">—</div></div>
-					</div>
-
-					<pre class="ett-json" id="ett-progress-json">{}</pre>
-
-					<div class="ett-warning ett-hidden" id="ett-stalled">
-						<span id="ett-stalled-text"></span>
-					</div>
-			</div>
-
-			<div class="ett-progress ett-mt-10" id="ett-history-progress">
-				<div class="ett-progress-head">
-					<div>
-						<div class="ett-title">History Fetch Progress</div>
-						<div class="ett-sub" id="ett-history-phase">Idle.</div>
-						<div class="ett-sub" id="ett-history-msg">—</div>
-					</div>
-
-					<div class="ett-status-stack">
-                        <div class="ett-heartbeat" id="ett-history-esi">
-                            <span class="ett-dot"></span>
-                            <span class="ett-hb-text" id="ett-history-esi-text">ESI: Checking...</span>
-                        </div>
-                        
-                        <div class="ett-heartbeat" id="ett-history-heartbeat" style="display:none;">
-                            <span class="ett-dot"></span>
-                            <span class="ett-hb-text">No heartbeat</span>
-                        </div>
-					</div>
-				</div>
-
-				<div class="ett-kpis" style="grid-template-columns:repeat(6,1fr);">
-					<div class="ett-kpi"><div class="ett-k">Elapsed</div><div class="ett-v" id="ett-history-kpi-elapsed">—</div></div>
-					<div class="ett-kpi"><div class="ett-k">Hub</div><div class="ett-v" id="ett-history-kpi-hub">—</div></div>
-					<div class="ett-kpi"><div class="ett-k">Items Done</div><div class="ett-v" id="ett-history-kpi-done">—</div></div>
-					<div class="ett-kpi"><div class="ett-k">Items Total</div><div class="ett-v" id="ett-history-kpi-total">—</div></div>
-					<div class="ett-kpi"><div class="ett-k">Rows Written</div><div class="ett-v" id="ett-history-kpi-written">—</div></div>
-					<div class="ett-kpi"><div class="ett-k">Concurrency</div><div class="ett-v" id="ett-history-kpi-concurrency">—</div></div>
-				</div>
-
-				<div style="margin-top:10px;background:#e2e4e7;border-radius:6px;height:10px;overflow:hidden;">
-					<div id="ett-history-bar" style="height:100%;background:#00a32a;width:0%;transition:width 0.3s;"></div>
-				</div>
-				<div style="text-align:right;font-size:12px;color:#646970;margin-top:3px;" id="ett-history-bar-pct">0%</div>
-
-				<pre class="ett-json" id="ett-history-progress-json">{}</pre>
-			</div>
-		</div>
-
-			<div class="ett-card">
-				<h2>Schedule</h2>
-				<p>Automatic runs use the site timezone: <strong><?php echo esc_html($tz); ?></strong></p>
-
-				<?php if (!empty($_GET['sched_saved'])): // phpcs:ignore WordPress.Security.NonceVerification.Recommended ?>
-				<div class="notice notice-success inline"><p><strong>Saved.</strong> Schedule updated.</p></div>
-				<?php endif; ?>
-
-				<?php
-				$runner_token = ETT_Runner::get_or_create_token();
-				$site_url     = trailingslashit(home_url());
-				$curl_cmd     = 'curl -s "' . $site_url . '?ett_ph_run=' . $runner_token . '"';
-				$wp_path      = ABSPATH;
-				$cli_cmd      = 'wp --path=' . escapeshellarg(rtrim($wp_path, '/')) . ' ett-prices run --quiet';
-				?>
-
-				<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="ett-sched-form">
-					<?php wp_nonce_field('ett_save_schedule'); ?>
-					<input type="hidden" name="action" value="ett_save_schedule"/>
-
-					<div class="ett-row">
-						<label>Start time</label>
-						<input type="time" class="ett-sched-input" name="start_time" value="<?php echo esc_attr($sched_start_time); ?>" required />
-					</div>
-
-					<div class="ett-row">
-						<label>Run every (hours)</label>
-						<select name="freq_hours" class="ett-sched-input">
-							<?php
-							$options = [1,2,3,4,6,8,12,24,48,72,168];
-							if (!in_array($sched_freq_hours, $options, true)) $options[] = $sched_freq_hours;
-							sort($options);
-							foreach ($options as $h){
-								echo '<option value="' . esc_attr($h) . '" ' . selected($sched_freq_hours, $h, false) . '>' . esc_html($h) . '</option>';
-							}
-							?>
-						</select>
-					</div>
-
-					<div id="ett-sched-rate-warning" class="ett-sched-warning ett-hidden">
-						<strong>Warning:</strong> Running every 1–2 hours may trigger ESI rate limiting. It is recommended to use 4 hours or more unless you understand the load implications.
-					</div>
-
-					<div class="ett-row" style="margin-top:8px">
-						<label>Next scheduled run</label>
-						<span id="ett-next-run" style="font-size:13px;color:#50575e"><?php
-							$_due_debug = ETT_Runner::get_due_debug();
-							echo esc_html($sched_enabled ? ($_due_debug['next_slot'] ?? 'Unknown') : 'Schedule paused');
-						?></span>
-					</div>
-
-					<h3>Cron setup</h3>
-					<p>The schedule requires an external cron service pinging the endpoint below every minute. The Start time and Run every settings above control when a run actually kicks off — the pings just keep an active run moving and check whether a new one is due.</p>
-
-					<table class="form-table" style="margin-top:0">
-						<tr>
-							<th style="width:180px">Option A — HTTP<br><small style="font-weight:normal">(any host, no SSH)</small></th>
-							<td>
-								<div style="display:flex;align-items:center;gap:8px">
-									<code id="ett-curl-cmd" style="display:block;flex:1;background:#f6f6f6;padding:8px 10px;border:1px solid #ddd;border-radius:4px;word-break:break-all"><?php echo esc_html($curl_cmd); ?></code>
-									<button type="button" class="button button-small ett-copy-btn" data-target="ett-curl-cmd">Copy</button>
-								</div>
-								<p class="description" style="margin-top:6px">Set your cron service to call this URL every minute. Each request works for the full PHP execution window before saving state, so a 10–20 minute run completes across only a handful of pings.</p>
-							</td>
-						</tr>
-						<tr>
-							<th>HTTP token</th>
-							<td>
-								<div style="display:flex;align-items:center;gap:8px">
-									<code id="ett-runner-token" style="letter-spacing:.05em"><?php echo esc_html($runner_token); ?></code>
-									<button type="button" class="button button-small" id="ett-regen-token">Regenerate</button>
-								</div>
-								<p class="description" style="margin-top:4px">Regenerating invalidates the old token immediately — update your cron URL afterwards.</p>
-							</td>
-						</tr>
-						<tr>
-							<th>Option B — WP-CLI<br><small style="font-weight:normal">(requires SSH)</small></th>
-							<td>
-								<div style="display:flex;align-items:center;gap:8px">
-									<code id="ett-cli-cmd" style="display:block;flex:1;background:#f6f6f6;padding:8px 10px;border:1px solid #ddd;border-radius:4px;word-break:break-all"><?php echo esc_html($cli_cmd); ?></code>
-									<button type="button" class="button button-small ett-copy-btn" data-target="ett-cli-cmd">Copy</button>
-								</div>
-								<p class="description" style="margin-top:6px">Runs entirely in PHP-CLI with no HTTP overhead. Set your server crontab to <code>* * * * *</code>. Adjust <code>wp</code> to the full path of your WP-CLI binary if needed.</p>
-							</td>
-						</tr>
-					</table>
-
-					<div style="margin-top:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-						<?php submit_button('Save Schedule', 'primary', 'submit', false, ['style' => 'margin:0']); ?>
-						<button type="button" id="ett-cancel-schedule-btn" class="button <?php echo $sched_enabled ? 'button-secondary' : 'button-primary'; ?>" style="margin:0">
-							<?php echo $sched_enabled ? 'Pause Schedule' : 'Resume Schedule'; ?>
-						</button>
-					</div>
-				</form>
-				<script>
-				(function(){
-					var cancelBtn = document.getElementById('ett-cancel-schedule-btn');
-					var enabled = <?php echo $sched_enabled ? 'true' : 'false'; ?>;
-					if (cancelBtn) {
-						cancelBtn.addEventListener('click', function() {
-							var newEnabled = !enabled;
-							var label = newEnabled ? 'Resuming…' : 'Pausing…';
-							cancelBtn.disabled = true;
-							cancelBtn.textContent = label;
-							var nonce = <?php echo wp_json_encode(wp_create_nonce('ett_admin')); ?>;
-							fetch(ajaxurl, {
-								method: 'POST',
-								headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-								body: 'action=ett_cancel_schedule_ajax&_ajax_nonce=' + encodeURIComponent(nonce) + '&enabled=' + (newEnabled ? '1' : '0')
-							}).then(function(r){ return r.json(); }).then(function(data){
-								if (data.success) {
-									enabled = newEnabled;
-									cancelBtn.textContent = enabled ? 'Pause Schedule' : 'Resume Schedule';
-									cancelBtn.className = 'button ' + (enabled ? 'button-secondary' : 'button-primary');
-									if (typeof refreshNextRun === 'function') refreshNextRun();
-								}
-								cancelBtn.disabled = false;
-							}).catch(function(){ cancelBtn.disabled = false; cancelBtn.textContent = enabled ? 'Pause Schedule' : 'Resume Schedule'; });
-						});
-					}
-				})();
-				</script>
-
-				<script>
-				(function(){
-					// Copy buttons
-					document.querySelectorAll('.ett-copy-btn').forEach(function(btn){
-						btn.addEventListener('click', function(){
-							var target = document.getElementById(this.dataset.target);
-							if (!target) return;
-							var text = target.textContent.trim();
-							if (navigator.clipboard && navigator.clipboard.writeText) {
-								navigator.clipboard.writeText(text);
-							} else {
-								var r = document.createRange();
-								r.selectNode(target);
-								window.getSelection().removeAllRanges();
-								window.getSelection().addRange(r);
-								document.execCommand('copy');
-								window.getSelection().removeAllRanges();
-							}
-							var orig = this.textContent;
-							this.textContent = 'Copied!';
-							var b = this;
-							setTimeout(function(){ b.textContent = orig; }, 1500);
-						});
-					});
-
-					// Regenerate token
-					var regenBtn = document.getElementById('ett-regen-token');
-					if (regenBtn) {
-						regenBtn.addEventListener('click', function(){
-							if (!confirm('Regenerate the HTTP token?\n\nYour existing cron URL will stop working until you update it.')) return;
-							var btn = this;
-							btn.disabled = true;
-							btn.textContent = 'Regenerating\u2026';
-							var nonce = <?php echo wp_json_encode(wp_create_nonce('ett_admin')); ?>;
-							var base  = <?php echo wp_json_encode(trailingslashit(home_url())); ?>;
-							fetch(ajaxurl, {
-								method: 'POST',
-								headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-								body: 'action=ett_runner_regen_token&_ajax_nonce=' + encodeURIComponent(nonce)
-							})
-							.then(function(r){ return r.json(); })
-							.then(function(data){
-								if (data.success && data.data && data.data.token) {
-									var tok = data.data.token;
-									var tokenEl = document.getElementById('ett-runner-token');
-									var curlEl  = document.getElementById('ett-curl-cmd');
-									if (tokenEl) tokenEl.textContent = tok;
-									if (curlEl)  curlEl.textContent  = 'curl -s "' + base + '?ett_ph_run=' + tok + '"';
-								}
-								btn.disabled = false;
-								btn.textContent = 'Regenerate';
-							})
-							.catch(function(){
-								btn.disabled = false;
-								btn.textContent = 'Regenerate';
-							});
-						});
-					}
-				})();
-				</script>
-			</div>
-				<div class="ett-card" style="margin-top:16px">
-					<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
-						<h3 style="margin:0">Run History</h3>
-						<button type="button" id="ett-clear-history-btn" class="button button-secondary button-small">Clear History</button>
-					</div>
-					<div id="ett-run-history" class="ett-history-wrap">
-						<?php if (!$job_history && !$job_history_err): ?>
-							<p class="description">No runs found yet.</p>
-						<?php elseif ($job_history_err): ?>
-							<p class="description">Unable to load history: <?php echo esc_html($job_history_err); ?></p>
-						<?php else: ?>
-							<table class="widefat striped ett-history-table">
-								<thead><tr>
-									<th>Type</th><th>Started</th><th>Finished</th><th>Status</th><th>Driver</th><th>Last message</th>
-								</tr></thead>
-								<tbody>
-								<?php foreach ($job_history as $row):
-									$prog = [];
-									try { $prog = json_decode($row['progress_json'] ?? '', true) ?: []; } catch (Exception $e){}
-									$driver_raw  = $prog['driver'] ?? 'browser';
-									$driver_lbl  = $driver_raw === 'browser' ? 'Manual' : 'Scheduled';
-									$type_lbl    = ($row['job_type'] ?? 'prices') === 'history' ? 'History fetch' : 'Price run';
-									$msg         = !empty($row['last_error']) ? $row['last_error'] : ($prog['last_msg'] ?? '');
-									$finished    = !empty($row['finished_at']) ? esc_html($row['finished_at'] . " ({$tz})") : '&mdash;';
-								?>
-								<tr>
-									<td><?php echo esc_html($type_lbl); ?></td>
-									<td><?php echo esc_html(($row['started_at'] ?? '') . " ({$tz})"); ?></td>
-									<td><?php echo $finished; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pre-escaped at assignment, may contain safe &mdash; entity ?></td>
-									<td><?php echo esc_html($row['status'] ?? ''); ?></td>
-									<td><?php echo esc_html($driver_lbl); ?></td>
-									<td><?php echo esc_html($msg); ?></td>
-								</tr>
-								<?php endforeach; ?>
-								</tbody>
-							</table>
-						<?php endif; ?>
-					</div>
-				</div>
-				<script>(function(){
-					var clearBtn = document.getElementById('ett-clear-history-btn');
-					if (clearBtn) {
-						clearBtn.addEventListener('click', function() {
-							if (!confirm('Clear all completed run history? This cannot be undone.')) return;
-							clearBtn.disabled = true; clearBtn.textContent = 'Clearing…';
-							var nonce = <?php echo wp_json_encode(wp_create_nonce('ett_admin')); ?>;
-							fetch(ajaxurl, { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
-								body:'action=ett_clear_history_ajax&_ajax_nonce='+encodeURIComponent(nonce)
-							}).then(function(r){return r.json();}).then(function(data){
-								if (data.success) document.getElementById('ett-run-history').innerHTML = '<p class="description">No runs found yet.</p>';
-								clearBtn.disabled = false; clearBtn.textContent = 'Clear History';
-							}).catch(function(){ clearBtn.disabled = false; clearBtn.textContent = 'Clear History'; });
-						});
-					}
-				})();</script>
+				<?php self::render_template('price-helper/card-run-history.php',
+					compact('job_history', 'job_history_err', 'tz')); ?>
 
 			</div><!-- /.ett-tab-panel -->
 			<?php endif; // price-helper tab ?>
@@ -1403,6 +658,17 @@ class ETT_Admin {
 
 		</div><!-- /.wrap -->
 		<?php
+	}
+
+	/**
+	 * Include a template file, extracting the provided variables into local scope.
+	 *
+	 * @param string $template Path relative to the plugin's templates/ directory.
+	 * @param array  $vars     Variables to expose inside the template.
+	 */
+	private static function render_template(string $template, array $vars = []): void {
+		if ($vars) extract($vars, EXTR_SKIP); // phpcs:ignore WordPress.PHP.DontExtract.extract_extract -- intentional template variable injection
+		include ETT_PH_PATH . 'templates/' . $template;
 	}
 
 	private static function render_tree(array $nodes, array $selected_ids){
