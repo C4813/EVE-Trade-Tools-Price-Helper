@@ -613,38 +613,31 @@ class ETT_Admin {
 				<?php endforeach; ?>
 			</nav>
 
-			<?php if ($active_tab === 'price-helper'): ?>
+            <?php if ($active_tab === 'price-helper'): ?>
 			<div class="ett-tab-panel">
-
 				<div class="ett-grid">
-					<?php self::render_template('price-helper/card-db.php',
+					<?php self::render_template('card-db.php',
 						compact('db', 'db_test', 'schema_ok')); ?>
-					<?php self::render_template('price-helper/card-fuzzwork.php',
+					<?php self::render_template('card-fuzzwork.php',
 						compact('import_meta', 'last_import_txt', 'details_txt', 'schema_ok')); ?>
 				</div>
-
 				<div class="ett-grid">
-					<?php self::render_template('price-helper/card-sso.php',
+					<?php self::render_template('card-sso.php',
 						compact('client_id', 'client_secret', 'sso_authed', 'char_name', 'cache', 'cache_at')); ?>
-					<?php self::render_template('price-helper/card-market-groups.php',
+					<?php self::render_template('card-market-groups.php',
 						compact('tree', 'selected_groups', 'schema_ok', 'typeid_display', 'market_tree_html')); ?>
 				</div>
-
-				<?php self::render_template('price-helper/card-hubs.php',
+				<?php self::render_template('card-hubs.php',
 					compact('selected_hubs', 'secondary_structures', 'tertiary_structures',
 					        'sso_authed', 'cache', 'cache_at')); ?>
-
-				<?php self::render_template('price-helper/card-actions.php',
+				<?php self::render_template('card-actions.php',
 					compact('schema_ok', 'lastRun', 'tz',
 					        'batch_max_pages', 'batch_max_seconds', 'history_batch_size')); ?>
-
-				<?php self::render_template('price-helper/card-schedule.php',
+				<?php self::render_template('card-schedule.php',
 					compact('sched_start_time', 'sched_freq_hours', 'sched_enabled', 'tz',
 					        'runner_token', 'curl_cmd', 'cli_cmd', 'next_slot_display')); ?>
-
-				<?php self::render_template('price-helper/card-run-history.php',
+				<?php self::render_template('card-run-history.php',
 					compact('job_history', 'job_history_err', 'tz')); ?>
-
 			</div><!-- /.ett-tab-panel -->
 			<?php endif; // price-helper tab ?>
 
