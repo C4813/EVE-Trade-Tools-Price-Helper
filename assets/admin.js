@@ -1844,3 +1844,130 @@
 		setInterval(refreshEsiStatus, 15000);
 	});
 })(jQuery);
+// ── Schedule pause/resume button ─────────────────────────────────────────────
+(function(){
+	var cancelBtn = document.getElementById('ett-cancel-schedule-btn');
+	var enabled   = !!ETT_ADMIN.sched_enabled;
+
+	if (!cancelBtn) return;
+
+	cancelBtn.addEventListener('click', function(){
+		var newEnabled = !enabled;
+		cancelBtn.disabled    = true;
+		cancelBtn.textContent = newEnabled ? 'Resuming\u2026' : 'Pausing\u2026';
+
+		fetch(ajaxurl, {
+			method:  'POST',
+			headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+			body:    'action=ett_cancel_schedule_ajax'
+			       + '&_ajax_nonce=' + encodeURIComponent(ETT_ADMIN.nonce)
+			       + '&enabled='     + (newEnabled ? '1' : '0')
+		})
+		.then(function(r){ return r.json(); })
+		.then(function(data){
+			if (data.success){
+				enabled               = newEnabled;
+				cancelBtn.textContent = enabled ? 'Pause Schedule' : 'Resume Schedule';
+				cancelBtn.className   = 'button ' + (enabled ? 'button-secondary' : 'button-primary');
+				if (typeof refreshNextRun === 'function') refreshNextRun();
+			}
+			cancelBtn.disabled = false;
+		})
+		.catch(function(){
+			cancelBtn.disabled    = false;
+			cancelBtn.textContent = enabled ? 'Pause Schedule' : 'Resume Schedule';
+		});
+	});
+})();
+
+// ── Copy-to-clipboard buttons + HTTP-token regeneration ──────────────────────
+(function(){
+	document.querySelectorAll('.ett-copy-btn').forEach(function(btn){
+		btn.addEventListener('click', function(){
+			var target = document.getElementById(this.dataset.target);
+			if (!target) return;
+			var text = target.textContent.trim();
+
+			if (navigator.clipboard && navigator.clipboard.writeText){
+				navigator.clipboard.writeText(text);
+			} else {
+				var r = document.createRange();
+				r.selectNode(target);
+				window.getSelection().removeAllRanges();
+				window.getSelection().addRange(r);
+				document.execCommand('copy');
+				window.getSelection().removeAllRanges();
+			}
+
+			var orig = this.textContent;
+			var self = this;
+			this.textContent = 'Copied!';
+			setTimeout(function(){ self.textContent = orig; }, 1500);
+		});
+	});
+
+	var regenBtn = document.getElementById('ett-regen-token');
+	if (!regenBtn) return;
+
+	regenBtn.addEventListener('click', function(){
+		if (!confirm('Regenerate the HTTP token?\n\nYour existing cron URL will stop working until you update it.')) return;
+
+		var btn = this;
+		btn.disabled    = true;
+		btn.textContent = 'Regenerating\u2026';
+
+		fetch(ajaxurl, {
+			method:  'POST',
+			headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+			body:    'action=ett_runner_regen_token&_ajax_nonce=' + encodeURIComponent(ETT_ADMIN.nonce)
+		})
+		.then(function(r){ return r.json(); })
+		.then(function(data){
+			if (data.success && data.data && data.data.token){
+				var tok     = data.data.token;
+				var tokenEl = document.getElementById('ett-runner-token');
+				var curlEl  = document.getElementById('ett-curl-cmd');
+				if (tokenEl) tokenEl.textContent = tok;
+				if (curlEl)  curlEl.textContent  = 'curl -s "' + ETT_ADMIN.home_url + '?ett_ph_run=' + tok + '"';
+			}
+			btn.disabled    = false;
+			btn.textContent = 'Regenerate';
+		})
+		.catch(function(){
+			btn.disabled    = false;
+			btn.textContent = 'Regenerate';
+		});
+	});
+})();
+
+// ── Clear run-history button ──────────────────────────────────────────────────
+(function(){
+	var clearBtn = document.getElementById('ett-clear-history-btn');
+	if (!clearBtn) return;
+
+	clearBtn.addEventListener('click', function(){
+		if (!confirm('Clear all completed run history? This cannot be undone.')) return;
+
+		clearBtn.disabled    = true;
+		clearBtn.textContent = 'Clearing\u2026';
+
+		fetch(ajaxurl, {
+			method:  'POST',
+			headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+			body:    'action=ett_clear_history_ajax&_ajax_nonce=' + encodeURIComponent(ETT_ADMIN.nonce)
+		})
+		.then(function(r){ return r.json(); })
+		.then(function(data){
+			if (data.success){
+				document.getElementById('ett-run-history').innerHTML =
+					'<p class="description">No runs found yet.</p>';
+			}
+			clearBtn.disabled    = false;
+			clearBtn.textContent = 'Clear History';
+		})
+		.catch(function(){
+			clearBtn.disabled    = false;
+			clearBtn.textContent = 'Clear History';
+		});
+	});
+})();
