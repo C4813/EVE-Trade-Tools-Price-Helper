@@ -584,9 +584,27 @@ class ETT_Jobs {
 		foreach ($orders as $o) {
 			$progress['orders_seen']++;
 
-			if ($source === 'primary' && (int)($o['location_id'] ?? 0) !== $station_id) continue;
+			if ($source === 'primary') {
+                $is_buy_order = (bool)($o['is_buy_order'] ?? false);
+                if ($is_buy_order) {
+                    $range = $o['range'] ?? 'station';
+                    if ($range === 'station') {
+                        if ((int)($o['location_id'] ?? 0) !== $station_id) continue;
+                    } elseif ($range === 'solarsystem') {
+                        if ((int)($o['system_id'] ?? 0) !== (int)$hub['system_id']) continue;
+                    } elseif ($range === 'region') {
+                        // always fulfillable at any station in the region — include
+                    } else {
+                        // jump range (1–40) — would need a jump map to resolve correctly
+                        // conservative fallback: exclude, same as station-only
+                        if ((int)($o['location_id'] ?? 0) !== $station_id) continue;
+                    }
+                } else {
+                    if ((int)($o['location_id'] ?? 0) !== $station_id) continue;
+                }
+            }
 
-			$type_id = (int)($o['type_id'] ?? 0);
+            $type_id = (int)($o['type_id'] ?? 0);
 			if (!isset($allow[$type_id])) continue;
 
 			$progress['matched_orders']++;
