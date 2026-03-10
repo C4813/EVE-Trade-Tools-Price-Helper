@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 1.5.1
+Stable tag: 1.6.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -51,6 +51,13 @@ No. All functionality is restricted to the WordPress admin area.
 No. As of 1.5.0, scheduled runs use an external system cron pinging a token-authenticated HTTP endpoint every minute. WP-Cron is no longer used. The Schedule tab shows the curl command and optional WP-CLI command to configure your cron service.
 
 == Changelog ==
+
+= 1.6.0 =
+* Changed: Action buttons renamed for clarity — "Run All" is now "Fetch All", "Run Prices" is now "Fetch Prices", and "Run History" is now "Fetch History". Descriptive tooltips added to each button.
+* Internal: All admin card HTML extracted from ETT_Admin::render() into dedicated template files under templates/price-helper/ — one file per card (External Database, Fuzzwork Import, EVE SSO, Market Groups, Trade Hubs, Actions, Schedule, Run History).
+* Internal: Three inline <script> blocks (schedule pause/resume, copy buttons + token regeneration, clear history) moved into assets/admin.js. No behaviour change.
+* Internal: sched_enabled and home_url added to the ETT_ADMIN localised data object.
+* Internal: Added private ETT_Admin::render_template() helper for scoped template inclusion.
 
 = 1.5.1 =
 * Performance: History fetch default concurrency raised from 5 to 20; maximum raised to 50. Users who had never explicitly saved the concurrency setting were running at the original slow rate of 5 regardless of the cap changes in 1.5.0.
@@ -156,6 +163,9 @@ No. As of 1.5.0, scheduled runs use an external system cron pinging a token-auth
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.6.0 =
+Cosmetic and code-quality release. Action buttons renamed (Fetch All / Fetch Prices / Fetch History). No database schema changes. No behaviour changes. Safe to upgrade in place.
 
 = 1.5.0 =
 WP-Cron scheduling removed. After upgrading, configure an external cron service to ping the URL shown in the Schedule tab every minute — your existing schedule settings (start time, frequency) are preserved. No database schema changes. Safe to upgrade in place.
