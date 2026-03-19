@@ -105,7 +105,7 @@ final class ETT_SDE {
 	 */
 	public static function import_step(int $step, string $zip_path, PDO $pdo): array {
 		if (!isset(self::STEPS[$step])) {
-			throw new Exception('Invalid import step: ' . $step);
+			throw new Exception('Invalid import step: ' . esc_html((string) $step));
 		}
 
 		$zip = new ZipArchive();
@@ -164,7 +164,7 @@ final class ETT_SDE {
 	private static function open_stream(ZipArchive $zip, string $entry) {
 		$stream = $zip->getStream($entry);
 		if ($stream === false) {
-			throw new Exception('Failed to open ZIP entry: ' . $entry);
+			throw new Exception('Failed to open ZIP entry: ' . esc_html($entry));
 		}
 		return $stream;
 	}
