@@ -1,6 +1,6 @@
 # EVE Trade Tools Price Helper
 
-A WordPress plugin that imports EVE Online static data from Fuzzwork and pulls live market prices from ESI into an external MySQL database, making that data available to other plugins without requiring repeated ESI calls.
+A WordPress plugin that imports EVE Online static data from the official EVE Static Data Export (SDE) and pulls live market prices from ESI into an external MySQL database, making that data available to other plugins without requiring repeated ESI calls.
 
 Part of the EVE Trade Tools suite. This is the base plugin — other ETT plugins depend on it for database access, SSO credentials, and the shared admin page.
 
@@ -8,7 +8,7 @@ Part of the EVE Trade Tools suite. This is the base plugin — other ETT plugins
 
 ## Features
 
-- **Fuzzwork static data import** — downloads and imports market groups, item types, meta groups, meta types, manufacturing outputs, and reprocessing materials into the external database
+- **SDE static data import** — uploads and imports the official EVE SDE ZIP from [developers.eveonline.com](https://developers.eveonline.com/static-data), populating market groups, item types, meta groups, meta types, manufacturing outputs, and reprocessing materials into the external database. Import runs as five sequential AJAX calls (one YAML file each) with a live progress bar and per-table row counts
 - **Hub price pulls** — fetches buy/sell orders from ESI for up to five NPC trade hubs; prices are upserted in-place rather than wiped, so consumers always have data
 - **Structure price support** — optional secondary and tertiary player structure per hub, fetched via EVE SSO; 401/403 responses are skipped cleanly rather than retried
 - **Adjusted prices** — fetches CCP's adjusted price list from ESI after each hub run and stores it for use in reprocessing tax calculations
@@ -29,7 +29,7 @@ Part of the EVE Trade Tools suite. This is the base plugin — other ETT plugins
 |---|---|
 | WordPress | 6.0 or later |
 | PHP | 8.0 or later |
-| PHP extension | `bz2` (required for Fuzzwork import) |
+| PHP extension | `zip` (required for SDE import) |
 | PHP extension | `curl` (required for parallel history fetching) |
 | External MySQL database | Separate from the WordPress database |
 
@@ -49,20 +49,29 @@ Part of the EVE Trade Tools suite. This is the base plugin — other ETT plugins
 
 Enter the host, port, database name, username, and password for a MySQL database **separate from your WordPress database**. Test and save the connection. The plugin creates and manages its own tables — the database should be dedicated to ETT data.
 
-### 2. Run the Fuzzwork import
+Once the connection is confirmed, the SDE import options appear immediately in the EVE SDE Import card without requiring a page refresh.
 
-Click **Run Fuzzwork Import**. This downloads and imports six datasets from [fuzzwork.co.uk](https://www.fuzzwork.co.uk):
+### 2. Run the SDE import
 
-| Dataset | Purpose |
+Download the EVE Static Data Export ZIP from [developers.eveonline.com/static-data](https://developers.eveonline.com/static-data) (~1 GB), then use one of the two import options:
+
+**Option A — Upload ZIP:** Upload the ZIP directly via the browser. Requires `upload_max_filesize` and `post_max_size` in `php.ini` to permit files of at least 1 GB.
+
+**Option B — Server-side path:** If your host imposes strict upload limits, place the ZIP on the server via SSH or FTP and enter its absolute path (e.g. `/home/user/sde.zip`).
+
+The import runs as five sequential AJAX calls. A progress bar and step log update live as each file is processed:
+
+| File | Table(s) populated |
 |---|---|
-| `invMarketGroups` | Market group hierarchy |
-| `invTypes` (CSV) | Item names, market group IDs, portionSize |
-| `invMetaGroups` | Meta group names (T1, T2, Faction, etc.) |
-| `invMetaTypes` | Per-item meta group assignments |
-| `industryActivityProducts` | Blueprint manufacturing output mapping |
-| `invTypeMaterials` | Reprocessing output materials and quantities |
+| `marketGroups.yaml` | `ett_invMarketGroups` |
+| `metaGroups.yaml` | `ett_invMetaGroups` |
+| `types.yaml` | `ett_invTypes`, `ett_invMetaTypes` |
+| `typeMaterials.yaml` | `ett_invTypeMaterials` |
+| `blueprints.yaml` | `ett_industryActivityProducts` (manufacturing outputs only) |
 
-Downloaded files are written to the WordPress uploads directory under `ett-price-helper/fuzzwork/` and are blocked from web access via `.htaccess` and `web.config`. Re-run this import whenever the Fuzzwork static data dump is updated.
+Files are located by basename so nested ZIP paths such as `sde/fsd/types.yaml` are handled automatically. No PHP YAML extension is required — the importer uses custom streaming line-by-line parsers.
+
+The Market Groups card populates automatically when the import completes. Re-run this import whenever CCP releases an updated SDE.
 
 ### 3. Select market groups and generate type IDs
 
@@ -92,7 +101,7 @@ To enable structure access, connect an EVE character under the SSO settings with
 
 Set a daily start time (uses the WordPress site timezone) and a repeat frequency in hours. Use the **Pause / Resume** button to suspend scheduled runs without clearing your settings — in-progress jobs always complete normally.
 
-**Scheduled runs require an external cron service.** The plugin no longer uses WP-Cron. Configure your cron service to send a request to the runner URL every minute:
+**Scheduled runs require an external cron service.** The plugin does not use WP-Cron. Configure your cron service to send a request to the runner URL every minute:
 
 ```
 https://your-site.com/?ett_ph_run=TOKEN
@@ -138,16 +147,16 @@ Fetches 30-day rolling average daily volume per type per region using parallel `
 
 ## External Database Tables
 
-All tables are created automatically by `ensure_schema()` on first job run. Schema migrations (e.g. adding `portionSize` to `ett_invTypes`) are applied automatically via `ALTER TABLE` on plugin load.
+All tables are created automatically by `ensure_schema()` on first job run.
 
 | Table | Populated by | Content |
 |---|---|---|
-| `ett_invMarketGroups` | Fuzzwork import | Market group hierarchy |
-| `ett_invTypes` | Fuzzwork import | Item names, market group, portionSize |
-| `ett_invMetaGroups` | Fuzzwork import | Meta group names |
-| `ett_invMetaTypes` | Fuzzwork import | Per-item meta group assignment |
-| `ett_industryActivityProducts` | Fuzzwork import | Blueprint-manufacturable type IDs |
-| `ett_invTypeMaterials` | Fuzzwork import | Reprocessing materials and quantities per batch |
+| `ett_invMarketGroups` | SDE import | Market group hierarchy |
+| `ett_invTypes` | SDE import | Item names, market group, portionSize |
+| `ett_invMetaGroups` | SDE import | Meta group names |
+| `ett_invMetaTypes` | SDE import | Per-item meta group assignment |
+| `ett_industryActivityProducts` | SDE import | Blueprint-manufacturable type IDs |
+| `ett_invTypeMaterials` | SDE import | Reprocessing materials and quantities per batch |
 | `ett_selected_typeids` | Generate TypeIDs | Active type ID list with meta tier |
 | `ett_prices` | Prices job | Best buy/sell per type per hub with volumes |
 | `ett_market_history` | History job | 30-day average daily volume per type per hub |
@@ -176,6 +185,7 @@ This hook fires on the EVE Trade Tools admin page before tabs are rendered.
 | Option | Content |
 |---|---|
 | `ett_extdb_settings` | External DB connection settings (password AES-256-CBC encrypted) |
+| `ett_sde_last_import_meta` | Timestamp and row counts from the last SDE import |
 | `ett_selected_market_groups` | Selected market group IDs |
 | `ett_selected_hubs` | Selected hub keys |
 | `ett_secondary_structures` / `ett_tertiary_structures` | Structure IDs per hub |
@@ -204,9 +214,10 @@ Database password and SSO credentials are stored encrypted using AES-256-CBC wit
 
 - Configure an external cron service to ping `/?ett_ph_run=TOKEN` every minute — the URL and token are shown in the Schedule tab
 - The external database should be dedicated to ETT data — the plugin does not modify or clean up external DB tables on uninstall
-- Re-run the Fuzzwork import after each new Fuzzwork static data dump is published
-- Re-run Generate TypeIDs after changing market group selection or after a Fuzzwork import
-- The `bz2` PHP extension must be available for the Fuzzwork import to function
+- Re-run the SDE import whenever CCP releases an updated Static Data Export
+- Re-run Generate TypeIDs after changing market group selection or after an SDE import
+- The `zip` PHP extension must be available for the SDE import to function
+- Uploaded ZIPs are stored temporarily in `uploads/ett-price-helper/sde-tmp/` during import and deleted automatically on completion or failure; the directory is blocked from web access via `.htaccess`
 - Job records are pruned after 90 days
 
 ---
