@@ -3,12 +3,12 @@ Contributors: c4813
 Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
-Requires PHP: 7.4
-Stable tag: 1.6.2
+Requires PHP: 8.0
+Stable tag: 1.7.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Admin-only tool to import Fuzzwork market groups/types and pull hub prices from ESI into an external database.
+Admin-only tool to import the EVE Static Data Export (SDE) and pull hub prices from ESI into an external database.
 
 == Description ==
 
@@ -16,19 +16,22 @@ EVE Trade Tools Price Helper is an admin-only utility plugin for WordPress that 
 
 It provides a controlled interface for:
 
-* Importing static reference data from Fuzzwork:
-  - invMarketGroups
-  - invTypes (nodescription CSV)
-  - invMetaGroups
-  - invMetaTypes
-  - industryActivityProducts
-  - invTypeMaterials (CSV bz2)
+* Importing static reference data from the official EVE Static Data Export (SDE) ZIP, downloaded from https://developers.eveonline.com/static-data:
+  - marketGroups.yaml → invMarketGroups
+  - metaGroups.yaml → invMetaGroups
+  - types.yaml → invTypes + invMetaTypes (metaGroupID is a direct field on each type, so no separate file is needed)
+  - typeMaterials.yaml → invTypeMaterials
+  - blueprints.yaml → industryActivityProducts (manufacturing outputs only)
 * Managing trade hubs and optional structure overrides
 * Connecting to EVE Online via ESI (including SSO for structures)
 * Running scheduled or manual price pulls
 * Writing normalized pricing data into an external database
 
+The SDE import uses streaming line-by-line YAML parsers — no PHP YAML extension is required, and memory usage stays low even for the largest files (types.yaml ~200 MB, blueprints.yaml ~500 MB uncompressed). Files are located by basename so nested ZIP paths such as `sde/fsd/types.yaml` are handled automatically.
+
 The plugin does not expose frontend functionality and does not modify the WordPress database schema beyond storing its own settings.
+
+**Upgrading from 1.6.x:** Version 1.7.0 removes the Fuzzwork import and replaces it with direct SDE ZIP import. A fresh install and new SDE import are required. The external database schema is unchanged; only the import source has changed.
 
 == Installation ==
 
@@ -36,8 +39,9 @@ The plugin does not expose frontend functionality and does not modify the WordPr
 2. Activate the plugin through the WordPress admin.
 3. Navigate to **WP Admin → EVE Trade Tools**.
 4. Configure your external database connection.
-5. Run the Fuzzwork import to populate required reference data.
-6. Configure hubs/structures and run price pulls manually or via schedule.
+5. Download the SDE ZIP from https://developers.eveonline.com/static-data.
+6. Upload the ZIP (or enter its server-side path) using the EVE SDE Import card.
+7. Configure hubs/structures and run price pulls manually or via schedule.
 
 == Frequently Asked Questions ==
 
@@ -50,7 +54,28 @@ No. All functionality is restricted to the WordPress admin area.
 = Does this rely on WP-Cron? =
 No. As of 1.5.0, scheduled runs use an external system cron pinging a token-authenticated HTTP endpoint every minute. WP-Cron is no longer used. The Schedule tab shows the curl command and optional WP-CLI command to configure your cron service.
 
+= Where do I get the SDE ZIP? =
+Download it from https://developers.eveonline.com/static-data. The file is ~1 GB. If your host has strict upload limits, download it directly to the server via SSH/FTP and use the server-path option in the SDE Import card.
+
+= Do I need a PHP YAML extension? =
+No. The importer uses custom streaming line-by-line parsers that handle the SDE YAML format without any PHP extension.
+
+= Which files are used from the SDE ZIP? =
+marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
+
 == Changelog ==
+
+= 1.7.0 =
+* Breaking change: Fuzzwork import removed entirely. Static reference data is now imported directly from the official EVE Static Data Export (SDE) ZIP from developers.eveonline.com. A fresh install and new SDE import are required — no backward compatibility with 1.6.x.
+* New: ETT_SDE class with streaming line-by-line YAML parsers for all five required files. No PHP YAML extension needed; memory use stays low regardless of file size.
+* New: SDE Import admin card replaces the Fuzzwork Import card. Supports two import methods — Option A: ZIP file upload via browser; Option B: server-side absolute path for hosts where upload limits make the ~1 GB ZIP impractical to upload over HTTP.
+* New: Import runs as five sequential AJAX calls (one per YAML file) rather than a single synchronous form POST. A progress bar and step log update live as each file completes, showing the row count written per table. An animated ellipsis on the status line confirms activity during each step so the UI never appears frozen.
+* New: Market Groups card tree auto-populates immediately after a successful SDE import without requiring a page refresh. The Generate TypeIDs button is re-enabled at the same time.
+* New: SDE import Option A / Option B forms appear immediately when DB settings are saved and the schema becomes ready, without requiring a page refresh.
+* Changed: invMetaTypes is now populated from types.yaml — each type carries a metaGroupID field directly, so no separate source file is required.
+* Changed: industryActivityProducts is now populated from blueprints.yaml, filtering to manufacturing activities only (equivalent to the previous activityID = 1 filter on industryActivityProducts.csv).
+* Changed: Minimum PHP version raised to 8.0.
+* Removed: class-ett-fuzzwork.php and card-fuzzwork.php deleted. Uninstall cleans up ett_sde_last_import_meta only.
 
 = 1.6.2 =
 * Fixed: buy_max inflated by buy orders that cannot be fulfilled at the target station. ESI returns all buy orders region-wide; the plugin was filtering by location_id only, allowing wide-range buy orders to set an artificially high buy_max. Buy orders are now filtered by their range field — station-range orders must match the target station_id, solarsystem-range orders must match the hub system_id, region-range orders are always included, and jump-range orders are conservatively excluded. Secondary and tertiary structure sources are unaffected.
@@ -169,6 +194,9 @@ No. As of 1.5.0, scheduled runs use an external system cron pinging a token-auth
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.7.0 =
+Fresh install required — uninstall 1.6.x first, then activate 1.7.0 and run the SDE import. Download the SDE ZIP from developers.eveonline.com. External database schema is unchanged; only the import source has changed. PHP 8.0+ now required.
 
 = 1.6.2 =
 Bug fix release. buy_max values will be corrected after running a fresh Fetch Prices. No database schema changes. Safe to upgrade in place.
