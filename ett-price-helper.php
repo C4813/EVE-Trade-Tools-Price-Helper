@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: EVE Trade Tools Price Helper
- * Description: Admin-only tool to import Fuzzwork market groups/types and pull hub prices from ESI into an external database.
- * Version: 1.6.2
+ * Description: Admin-only tool to import the EVE Static Data Export (SDE) and pull hub prices from ESI into an external database.
+ * Version: 1.7.0
  * Author: C4813
  * License: GPLv2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -16,7 +16,7 @@ define('ETT_PH_URL', plugin_dir_url(__FILE__));
 
 require_once ETT_PH_PATH . 'includes/class-ett-crypto.php';
 require_once ETT_PH_PATH . 'includes/class-ett-extdb.php';
-require_once ETT_PH_PATH . 'includes/class-ett-fuzzwork.php';
+require_once ETT_PH_PATH . 'includes/class-ett-sde.php';
 require_once ETT_PH_PATH . 'includes/class-ett-market.php';
 require_once ETT_PH_PATH . 'includes/class-ett-typeids.php';
 require_once ETT_PH_PATH . 'includes/class-ett-esi.php';
