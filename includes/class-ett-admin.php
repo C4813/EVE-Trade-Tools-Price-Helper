@@ -884,7 +884,7 @@ class ETT_Admin {
 			}
 		} else {
 			// Upload source.
-			// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotValidated
+			// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotValidated,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- tmp_name is a server-generated path; security is enforced by is_uploaded_file() below, not sanitization.
 			$upload = $_FILES['sde_zip'] ?? null;
 			if (
 				empty($upload) ||
@@ -966,7 +966,7 @@ class ETT_Admin {
 		}
 
 		// Upload source.
-		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotValidated
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotValidated,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- tmp_name is a server-generated path; security is enforced by is_uploaded_file() inside wp_handle_upload(), not sanitization.
 		$upload = $_FILES['sde_zip'] ?? null;
 		if (
 			empty($upload) ||
@@ -978,7 +978,12 @@ class ETT_Admin {
 			wp_send_json_error('File upload failed (error code ' . $code . '). Check upload_max_filesize and post_max_size in php.ini.', 400);
 		}
 
-		// Move to a protected temp dir inside the WP uploads folder.
+		// Move to a protected temp dir inside the WP uploads folder using the
+		// WP filesystem abstraction. We temporarily redirect the upload dir so
+		// wp_handle_upload() places the file in our sde-tmp subdirectory.
+		$token    = bin2hex(random_bytes(16));
+		$tmp_name = $token . '.zip';
+
 		$uploads = wp_upload_dir();
 		$tmp_dir = trailingslashit($uploads['basedir']) . 'ett-price-helper/sde-tmp/';
 		if (!file_exists($tmp_dir)) wp_mkdir_p($tmp_dir);
@@ -987,13 +992,32 @@ class ETT_Admin {
 		$ht = $tmp_dir . '.htaccess';
 		if (!file_exists($ht)) @file_put_contents($ht, "Deny from all\n");
 
-		$token    = bin2hex(random_bytes(16));
-		$tmp_path = $tmp_dir . $token . '.zip';
-		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
-		if (!@move_uploaded_file($upload['tmp_name'], $tmp_path)) {
-			wp_send_json_error('Failed to move uploaded file to temp directory.', 500);
+		// Override upload dir for this call only.
+		$set_upload_dir = function () use ($tmp_dir) {
+			return [
+				'path'   => untrailingslashit($tmp_dir),
+				'url'    => '',
+				'subdir' => '',
+				'basedir'=> untrailingslashit($tmp_dir),
+				'baseurl'=> '',
+				'error'  => false,
+			];
+		};
+		add_filter('upload_dir', $set_upload_dir);
+
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotValidated,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		$moved = wp_handle_upload($_FILES['sde_zip'], [
+			'test_form' => false,
+			'mimes'     => ['zip' => 'application/zip|application/octet-stream'],
+		]);
+
+		remove_filter('upload_dir', $set_upload_dir);
+
+		if (!empty($moved['error']) || empty($moved['file'])) {
+			wp_send_json_error('Failed to move uploaded file: ' . esc_html($moved['error'] ?? 'unknown error'), 500);
 		}
 
+		$tmp_path = $moved['file'];
 		$filename = sanitize_file_name($upload['name'] ?? 'sde.zip');
 		set_transient(
 			'ett_sde_tmp_' . get_current_user_id() . '_' . $token,
@@ -1020,7 +1044,7 @@ class ETT_Admin {
 		// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
 		@ini_set('memory_limit', '1024M');
 
-		$step  = (int) wp_unslash($_POST['step']  ?? 0);
+		$step  = absint(wp_unslash($_POST['step']  ?? 0));
 		$token = sanitize_key(wp_unslash($_POST['token'] ?? ''));
 
 		if ($step < 1 || $step > 5 || $token === '') {
