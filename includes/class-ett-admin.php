@@ -24,7 +24,7 @@ class ETT_Admin {
 	const OPT_SSO_STRUCTURES_CACHE_AT = 'ett_sso_structures_cache_at';
 	const OPT_SSO_CORP_CACHE          = 'ett_sso_corp_cache';
 
-	const OPT_LAST_IMPORT = 'ett_fuzzwork_last_import_meta';
+	const OPT_LAST_IMPORT = 'ett_sde_last_import_meta';
 
 	/** @var array<array{slug:string,label:string,callback:callable}> */
 	private static array $tabs = [];
@@ -138,8 +138,11 @@ class ETT_Admin {
 		add_action('admin_post_nopriv_ett_eve_callback',  [__CLASS__, 'handle_eve_callback']);
 		add_action('admin_post_ett_sso_disconnect', [__CLASS__, 'handle_sso_disconnect']);
 		add_action('wp_ajax_ett_sso_refresh_structures', [__CLASS__, 'ajax_sso_refresh_structures']);
-		add_action('admin_post_ett_import_fuzzwork', [__CLASS__, 'handle_import_fuzzwork']);
-		add_action('wp_ajax_ett_import_fuzzwork_ajax', [__CLASS__, 'ajax_import_fuzzwork']);
+		add_action('admin_post_ett_import_sde', [__CLASS__, 'handle_import_sde']);
+		add_action('wp_ajax_ett_sde_prepare',     [__CLASS__, 'ajax_sde_prepare']);
+		add_action('wp_ajax_ett_sde_import_step', [__CLASS__, 'ajax_sde_import_step']);
+		add_action('wp_ajax_ett_sde_cleanup',     [__CLASS__, 'ajax_sde_cleanup']);
+		add_action('wp_ajax_ett_market_tree_ajax', [__CLASS__, 'ajax_market_tree']);
 		add_action('admin_post_ett_save_schedule', [__CLASS__, 'handle_save_schedule']);
 		add_action('admin_post_ett_save_perf', [__CLASS__, 'handle_save_perf']);
 		add_action('wp_ajax_ett_save_perf_ajax', [__CLASS__, 'ajax_save_perf']);
@@ -572,13 +575,13 @@ class ETT_Admin {
 			$active_tab = sanitize_key(wp_unslash($_GET['tab'] ?? 'price-helper'));
 
 		// ── Pre-compute template variables ─────────────────────────────────────
-		// Fuzzwork import details
+		// SDE import details
 		$last_import_txt = !empty($import_meta['imported_at']) ? (string)$import_meta['imported_at'] : 'Never';
-		$_fuzz_parts     = [];
-		foreach (['invMarketGroups','invTypes','invMetaGroups','invMetaTypes','industryActivityProducts','invTypeMaterials'] as $_k){
-			if (isset($import_meta[$_k])) $_fuzz_parts[] = $_k . ': ' . number_format((int)$import_meta[$_k]);
+		$_sde_parts      = [];
+		foreach (['invMarketGroups','invMetaGroups','invTypes','invMetaTypes','invTypeMaterials','industryActivityProducts'] as $_k){
+			if (isset($import_meta[$_k])) $_sde_parts[] = $_k . ': ' . number_format((int)$import_meta[$_k]);
 		}
-		$details_txt = !empty($_fuzz_parts) ? implode(' | ', $_fuzz_parts) : '';
+		$details_txt = !empty($_sde_parts) ? implode(' | ', $_sde_parts) : '';
 
 		// Schedule
 		$runner_token     = ETT_Runner::get_or_create_token();
@@ -618,7 +621,7 @@ class ETT_Admin {
 				<div class="ett-grid">
 					<?php self::render_template('card-db.php',
 						compact('db', 'db_test', 'schema_ok')); ?>
-					<?php self::render_template('card-fuzzwork.php',
+					<?php self::render_template('card-sde.php',
 						compact('import_meta', 'last_import_txt', 'details_txt', 'schema_ok')); ?>
 				</div>
 				<div class="ett-grid">
@@ -832,135 +835,319 @@ class ETT_Admin {
     	return [$batch_max_pages, $batch_max_seconds];
     }
 
-	public static function handle_import_fuzzwork(){
+	/**
+	 * Handles the SDE ZIP import form submission (both upload and server-path).
+	 * Registered as: admin_post_ett_import_sde
+	 */
+	public static function handle_import_sde(): void {
 		if (!current_user_can(self::CAP)) wp_die('Insufficient permissions.');
-		check_admin_referer('ett_import_fuzzwork');
+		check_admin_referer('ett_import_sde');
 
+		// Best-effort: allow long-running import.
 		if (function_exists('ignore_user_abort')) @ignore_user_abort(true);
-        // Large imports can exceed typical hosting execution limits; best-effort only.
-        // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
-        if (function_exists('set_time_limit')) { @set_time_limit(0); }
-        // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
-        @ini_set('max_execution_time', '0');
-        // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
-        @ini_set('memory_limit', '1024M');
+		// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
+		if (function_exists('set_time_limit')) { @set_time_limit(0); }
+		// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
+		@ini_set('max_execution_time', '0');
+		// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
+		@ini_set('memory_limit', '1024M');
 
-		register_shutdown_function(function(){
+		// Fatal-error safety net: redirect with an error message rather than a blank page.
+		register_shutdown_function(function () {
 			$e = error_get_last();
 			if (!$e) return;
-
 			$fatalTypes = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR];
 			if (!in_array($e['type'], $fatalTypes, true)) return;
-
-			$msg = sprintf(
-				'Fatal error [%d]: %s in %s:%d',
-				$e['type'],
-				$e['message'],
-				$e['file'],
-				$e['line']
-			);
-
-			if (!headers_sent()){
-				$url = add_query_arg(
-            	[
-            		'page'     => self::SLUG,
-            		'imported' => 0,
-            		'err'      => rawurlencode(sanitize_text_field($msg)),
-            	],
-            	admin_url('admin.php')
-            );
-            wp_safe_redirect($url);
+			$msg = sprintf('Fatal error [%d]: %s in %s:%d', $e['type'], $e['message'], $e['file'], $e['line']);
+			if (!headers_sent()) {
+				wp_safe_redirect(add_query_arg(
+					['page' => self::SLUG, 'imported' => 0, 'err' => rawurlencode(sanitize_text_field($msg))],
+					admin_url('admin.php')
+				));
 				exit;
 			}
 		});
 
+		// Resolve the ZIP path from whichever source was chosen.
+		$source        = sanitize_key(wp_unslash($_POST['ett_sde_source'] ?? 'upload'));
+		$zip_path      = '';
+		$delete_after  = false; // only true for temp-uploaded files
+
+		if ($source === 'path') {
+			$zip_path = sanitize_text_field(wp_unslash($_POST['sde_zip_path'] ?? ''));
+			if ($zip_path === '' || !file_exists($zip_path) || !is_readable($zip_path)) {
+				wp_safe_redirect(add_query_arg(
+					['page' => self::SLUG, 'imported' => 0, 'err' => rawurlencode('Server path not found or not readable: ' . $zip_path)],
+					admin_url('admin.php')
+				));
+				exit;
+			}
+		} else {
+			// Upload source.
+			// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotValidated
+			$upload = $_FILES['sde_zip'] ?? null;
+			if (
+				empty($upload) ||
+				!isset($upload['error'], $upload['tmp_name']) ||
+				$upload['error'] !== UPLOAD_ERR_OK ||
+				!is_uploaded_file($upload['tmp_name'])
+			) {
+				$upload_err = $upload['error'] ?? -1;
+				wp_safe_redirect(add_query_arg(
+					['page' => self::SLUG, 'imported' => 0, 'err' => rawurlencode('File upload failed (error code ' . (int)$upload_err . '). Check upload_max_filesize and post_max_size in php.ini.')],
+					admin_url('admin.php')
+				));
+				exit;
+			}
+			$zip_path     = (string) $upload['tmp_name'];
+			$delete_after = true;
+		}
+
+		// Connect to the external DB.
 		try {
 			ETT_ExternalDB::ensure_schema();
 			$pdo = ETT_ExternalDB::pdo();
-		} catch (Exception $e){
-			$url = add_query_arg(
-            	[
-            		'page'     => self::SLUG,
-            		'imported' => 0,
-            		'db_err'   => rawurlencode(sanitize_text_field($e->getMessage())),
-            	],
-            	admin_url('admin.php')
-            );
-            wp_safe_redirect($url);
+		} catch (Exception $e) {
+			if ($delete_after && file_exists($zip_path)) @wp_delete_file($zip_path);
+			wp_safe_redirect(add_query_arg(
+				['page' => self::SLUG, 'imported' => 0, 'db_err' => rawurlencode(sanitize_text_field($e->getMessage()))],
+				admin_url('admin.php')
+			));
 			exit;
 		}
 
+		// Run the SDE import.
 		try {
-            $t0 = microtime(true);
-            $meta = ETT_Fuzzwork::import_all($pdo);
-            // Ensure old installs can't keep showing stale elapsed_s if re-added later
-            unset($meta['elapsed_s']);
-            
-            update_option(self::OPT_LAST_IMPORT, $meta, false);
-
-			$url = add_query_arg(['page' => self::SLUG, 'imported' => 1], admin_url('admin.php'));
-            wp_safe_redirect($url);
+			$meta = ETT_SDE::import_from_zip($zip_path, $pdo);
+			update_option(self::OPT_LAST_IMPORT, $meta, false);
+			wp_safe_redirect(add_query_arg(['page' => self::SLUG, 'imported' => 1], admin_url('admin.php')));
 			exit;
-		} catch (Exception $e){
-			$url = add_query_arg(
-            	[
-            		'page'     => self::SLUG,
-            		'imported' => 0,
-            		'err'      => rawurlencode(sanitize_text_field($e->getMessage())),
-            	],
-            	admin_url('admin.php')
-            );
-            wp_safe_redirect($url);
+		} catch (Exception $e) {
+			wp_safe_redirect(add_query_arg(
+				['page' => self::SLUG, 'imported' => 0, 'err' => rawurlencode(sanitize_text_field($e->getMessage()))],
+				admin_url('admin.php')
+			));
 			exit;
+		} finally {
+			if ($delete_after && file_exists($zip_path)) @wp_delete_file($zip_path);
 		}
 	}
 
-    public static function ajax_import_fuzzwork(){
-    	if (!current_user_can(self::CAP)){
-    		wp_send_json_error('Insufficient permissions', 403);
-    	}
-    	check_ajax_referer('ett_admin');
-    
-    	// Best-effort: allow long-running import
-    	if (function_exists('ignore_user_abort')) @ignore_user_abort(true);
-        // Large imports can exceed typical hosting execution limits; best-effort only.
-        // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
-        if (function_exists('set_time_limit')) { @set_time_limit(0); }
-        // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
-        @ini_set('max_execution_time', '0');
-        // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
-        @ini_set('memory_limit', '1024M');
+	// ── AJAX: chunked SDE import ───────────────────────────────────────────
 
-    	try {
-    		ETT_ExternalDB::ensure_schema();
-    		$pdo = ETT_ExternalDB::pdo();
-    	} catch (Exception $e){
-    		wp_send_json_error('DB error: ' . $e->getMessage(), 400);
-    	}
-    
-    	try {
-            $t0 = microtime(true);
-            $meta = ETT_Fuzzwork::import_all($pdo);
-            unset($meta['elapsed_s']);
-            update_option(self::OPT_LAST_IMPORT, $meta, false);
-            
-            $parts = [];
-            foreach (['invMarketGroups','invTypes','invMetaGroups','invMetaTypes','industryActivityProducts','invTypeMaterials'] as $k){
-            	if (isset($meta[$k])) $parts[] = $k . ': ' . number_format((int)$meta[$k]);
-            }
-            $details_txt = !empty($parts) ? implode(' | ', $parts) : '';
+	/**
+	 * Step 0 of the chunked import.
+	 * Upload source: receives the ZIP via multipart upload, moves it to a
+	 *   protected temp dir, stores the path in a user-scoped transient.
+	 * Path source: validates the server-side path and stores it in the transient.
+	 *
+	 * Returns: { token: string, filename: string }
+	 */
+	public static function ajax_sde_prepare(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
 
-            wp_send_json_success([
-            	'imported'    => true,
-            	'imported_at' => $meta['imported_at'] ?? current_time('mysql'),
-            	'details_txt' => $details_txt,
-            	'meta'        => $meta,
-            ]);
-            
-    	} catch (Exception $e){
-    		wp_send_json_error($e->getMessage(), 400);
-    	}
-    }
+		$source = sanitize_key(wp_unslash($_POST['source'] ?? 'upload'));
+
+		if ($source === 'path') {
+			$zip_path = sanitize_text_field(wp_unslash($_POST['zip_path'] ?? ''));
+			if ($zip_path === '' || !file_exists($zip_path) || !is_readable($zip_path)) {
+				wp_send_json_error('Server path not found or not readable: ' . esc_html($zip_path), 400);
+			}
+			$token    = bin2hex(random_bytes(16));
+			$filename = basename($zip_path);
+			set_transient(
+				'ett_sde_tmp_' . get_current_user_id() . '_' . $token,
+				['path' => $zip_path, 'is_upload' => false],
+				2 * HOUR_IN_SECONDS
+			);
+			wp_send_json_success(['token' => $token, 'filename' => $filename]);
+			return;
+		}
+
+		// Upload source.
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotValidated
+		$upload = $_FILES['sde_zip'] ?? null;
+		if (
+			empty($upload) ||
+			!isset($upload['error'], $upload['tmp_name']) ||
+			$upload['error'] !== UPLOAD_ERR_OK ||
+			!is_uploaded_file($upload['tmp_name'])
+		) {
+			$code = (int) ($upload['error'] ?? -1);
+			wp_send_json_error('File upload failed (error code ' . $code . '). Check upload_max_filesize and post_max_size in php.ini.', 400);
+		}
+
+		// Move to a protected temp dir inside the WP uploads folder.
+		$uploads = wp_upload_dir();
+		$tmp_dir = trailingslashit($uploads['basedir']) . 'ett-price-helper/sde-tmp/';
+		if (!file_exists($tmp_dir)) wp_mkdir_p($tmp_dir);
+
+		// Deny web access.
+		$ht = $tmp_dir . '.htaccess';
+		if (!file_exists($ht)) @file_put_contents($ht, "Deny from all\n");
+
+		$token    = bin2hex(random_bytes(16));
+		$tmp_path = $tmp_dir . $token . '.zip';
+		// phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		if (!@move_uploaded_file($upload['tmp_name'], $tmp_path)) {
+			wp_send_json_error('Failed to move uploaded file to temp directory.', 500);
+		}
+
+		$filename = sanitize_file_name($upload['name'] ?? 'sde.zip');
+		set_transient(
+			'ett_sde_tmp_' . get_current_user_id() . '_' . $token,
+			['path' => $tmp_path, 'is_upload' => true],
+			2 * HOUR_IN_SECONDS
+		);
+		wp_send_json_success(['token' => $token, 'filename' => $filename]);
+	}
+
+	/**
+	 * Steps 1–5 of the chunked import.
+	 * Parses one YAML file from the stored ZIP and writes its data to the DB.
+	 *
+	 * Returns: { label: string, count: int, meta_count?: int, imported_at?: string, details_txt?: string }
+	 */
+	public static function ajax_sde_import_step(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
+
+		// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
+		if (function_exists('set_time_limit')) @set_time_limit(0);
+		// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
+		@ini_set('max_execution_time', '0');
+		// phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged
+		@ini_set('memory_limit', '1024M');
+
+		$step  = (int) wp_unslash($_POST['step']  ?? 0);
+		$token = sanitize_key(wp_unslash($_POST['token'] ?? ''));
+
+		if ($step < 1 || $step > 5 || $token === '') {
+			wp_send_json_error('Invalid step or token.', 400);
+		}
+
+		$transient_key = 'ett_sde_tmp_' . get_current_user_id() . '_' . $token;
+		$stored        = get_transient($transient_key);
+		if (empty($stored['path'])) {
+			wp_send_json_error('Session expired or invalid token. Please restart the import.', 400);
+		}
+
+		$zip_path = $stored['path'];
+		if (!file_exists($zip_path) || !is_readable($zip_path)) {
+			wp_send_json_error('ZIP file is no longer readable. Please restart the import.', 400);
+		}
+
+		try {
+			ETT_ExternalDB::ensure_schema();
+			$pdo = ETT_ExternalDB::pdo();
+		} catch (Exception $e) {
+			wp_send_json_error('DB error: ' . $e->getMessage(), 500);
+		}
+
+		try {
+			$result = ETT_SDE::import_step($step, $zip_path, $pdo);
+		} catch (Exception $e) {
+			wp_send_json_error($e->getMessage(), 500);
+		}
+
+		// On final step, persist the import meta and return the summary.
+		if ($step === 5) {
+			// Retrieve whatever was stored by earlier steps via a running meta transient.
+			$meta_key     = 'ett_sde_meta_' . get_current_user_id() . '_' . $token;
+			$running_meta = get_transient($meta_key) ?: [];
+			$running_meta[$result['label']] = $result['count'];
+
+			// Build the full meta array for OPT_LAST_IMPORT.
+			$final_meta = [
+				'invMarketGroups'          => (int) ($running_meta['invMarketGroups']          ?? 0),
+				'invMetaGroups'            => (int) ($running_meta['invMetaGroups']            ?? 0),
+				'invTypes'                 => (int) ($running_meta['invTypes + invMetaTypes']  ?? 0),
+				'invMetaTypes'             => (int) ($running_meta['invTypes + invMetaTypes']  ?? 0),
+				'invTypeMaterials'         => (int) ($running_meta['invTypeMaterials']         ?? 0),
+				'industryActivityProducts' => (int) ($running_meta['industryActivityProducts'] ?? 0),
+				'imported_at'              => gmdate('Y-m-d H:i:s') . ' UTC',
+			];
+			update_option(self::OPT_LAST_IMPORT, $final_meta, false);
+			delete_transient($meta_key);
+
+			$parts = [];
+			foreach (['invMarketGroups','invMetaGroups','invTypes','invMetaTypes','invTypeMaterials','industryActivityProducts'] as $k) {
+				if (isset($final_meta[$k])) $parts[] = $k . ': ' . number_format((int) $final_meta[$k]);
+			}
+
+			$result['imported_at'] = $final_meta['imported_at'];
+			$result['details_txt'] = implode(' | ', $parts);
+		} else {
+			// Accumulate counts in a short-lived meta transient.
+			$meta_key     = 'ett_sde_meta_' . get_current_user_id() . '_' . $token;
+			$running_meta = get_transient($meta_key) ?: [];
+			$running_meta[$result['label']] = $result['count'];
+			set_transient($meta_key, $running_meta, 2 * HOUR_IN_SECONDS);
+		}
+
+		wp_send_json_success($result);
+	}
+
+	/**
+	 * Cleanup step: deletes the temp ZIP (upload source only) and transients.
+	 */
+	public static function ajax_sde_cleanup(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
+
+		$token = sanitize_key(wp_unslash($_POST['token'] ?? ''));
+		if ($token === '') {
+			wp_send_json_success(); // nothing to do
+			return;
+		}
+
+		$uid           = get_current_user_id();
+		$transient_key = 'ett_sde_tmp_' . $uid . '_' . $token;
+		$meta_key      = 'ett_sde_meta_' . $uid . '_' . $token;
+
+		$stored = get_transient($transient_key);
+		if (!empty($stored['path']) && !empty($stored['is_upload']) && file_exists($stored['path'])) {
+			wp_delete_file($stored['path']);
+		}
+
+		delete_transient($transient_key);
+		delete_transient($meta_key);
+
+		wp_send_json_success();
+	}
+
+	/**
+	 * Returns the rendered market-group tree HTML for the currently selected groups.
+	 * Called by JS after a successful SDE import to refresh the card without a page reload.
+	 */
+	public static function ajax_market_tree(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
+
+		if (!ETT_ExternalDB::is_configured()) {
+			wp_send_json_error('Database not configured.', 400);
+		}
+
+		try {
+			$pdo  = ETT_ExternalDB::pdo();
+			$tree = ETT_Market::get_tree($pdo);
+		} catch (Exception $e) {
+			wp_send_json_error($e->getMessage(), 500);
+		}
+
+		$selected_groups = get_option(self::OPT_SELECTED_GROUPS, []);
+		if (!is_array($selected_groups)) $selected_groups = [];
+
+		ob_start();
+		self::render_tree($tree, $selected_groups);
+		$html = (string) ob_get_clean();
+
+		wp_send_json_success(['html' => $html]);
+	}
+
+
+
 
 /**
 	 * The single unified EVE SSO callback URL for all ETT plugins.
