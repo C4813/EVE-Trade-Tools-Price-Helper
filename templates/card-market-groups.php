@@ -24,7 +24,7 @@
 
 		<div class="ett-tree" id="ett-mg-tree">
 			<?php if (!$schema_ok): ?>
-				<p class="ett-muted">Configure external DB + import Fuzzwork to load market groups.</p>
+				<p class="ett-muted">Configure external DB + run the SDE import to load market groups.</p>
 			<?php else: ?>
 				<?php echo $market_tree_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pre-escaped by render_tree() ?>
 			<?php endif; ?>
