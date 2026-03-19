@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.7.0
+Stable tag: 1.7.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,6 +64,12 @@ No. The importer uses custom streaming line-by-line parsers that handle the SDE 
 marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
 
 == Changelog ==
+
+= 1.7.0.1 =
+* Fixed: PHPCS — `$step` and `$entry` in exception messages in `class-ett-sde.php` were not passed through an escaping function; both now use `esc_html()`.
+* Fixed: PHPCS — `$_FILES['sde_zip']` in both `handle_import_sde()` and `ajax_sde_prepare()` triggered `InputNotSanitized` warnings; `phpcs:ignore` comments updated with explicit justification (security enforced by `is_uploaded_file()` / `wp_handle_upload()`, not sanitization).
+* Fixed: PHPCS — `move_uploaded_file()` is forbidden under WordPress coding standards; replaced with `wp_handle_upload()` using a temporary `upload_dir` filter to direct the file into the `sde-tmp/` subdirectory.
+* Fixed: PHPCS — `$_POST['step']` cast with bare `(int)` in `ajax_sde_import_step()`; replaced with `absint()` which PHPCS recognises as explicit sanitization.
 
 = 1.7.0 =
 * Breaking change: Fuzzwork import removed entirely. Static reference data is now imported directly from the official EVE Static Data Export (SDE) ZIP from developers.eveonline.com. A fresh install and new SDE import are required — no backward compatibility with 1.6.x.
@@ -194,6 +200,9 @@ marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprin
 * Initial public release.
 
 == Upgrade Notice ==
+
+= 1.7.0.1 =
+PHPCS compliance fixes only. No functional or database changes. Safe to upgrade in place.
 
 = 1.7.0 =
 Fresh install required — uninstall 1.6.x first, then activate 1.7.0 and run the SDE import. Download the SDE ZIP from developers.eveonline.com. External database schema is unchanged; only the import source has changed. PHP 8.0+ now required.
