@@ -416,6 +416,15 @@
         $schemaEl.removeClass('ett-ok ett-bad')
                  .addClass(schemaOk ? 'ett-ok' : 'ett-bad')
                  .text(schemaOk ? 'Ready' : 'Not ready');
+
+        // Show/hide the SDE import forms depending on whether the schema is ready.
+        if (schemaOk) {
+          $('#ett-sde-no-db').hide();
+          $('#ett-sde-forms').show();
+        } else {
+          $('#ett-sde-no-db').show();
+          $('#ett-sde-forms').hide();
+        }
       });
     }
 
@@ -1428,6 +1437,196 @@
       }
     });
 
+    // ── SDE chunked AJAX import ───────────────────────────────────────────
+    //
+    // Flow (6 phases total):
+    //   Phase 0  — prepare  : upload ZIP or validate server path, get a token
+    //   Phase 1  — step 1   : marketGroups.yaml  → invMarketGroups
+    //   Phase 2  — step 2   : metaGroups.yaml    → invMetaGroups
+    //   Phase 3  — step 3   : types.yaml         → invTypes + invMetaTypes
+    //   Phase 4  — step 4   : typeMaterials.yaml → invTypeMaterials
+    //   Phase 5  — step 5   : blueprints.yaml    → industryActivityProducts
+    //   cleanup  — always   : delete temp file + transients
+    //
+    // Each phase updates the progress bar and appends a line to the log.
+
+    const SDE_STEPS = [
+      { file: 'marketGroups.yaml',  label: 'invMarketGroups'           },
+      { file: 'metaGroups.yaml',    label: 'invMetaGroups'             },
+      { file: 'types.yaml',         label: 'invTypes + invMetaTypes'   },
+      { file: 'typeMaterials.yaml', label: 'invTypeMaterials'          },
+      { file: 'blueprints.yaml',    label: 'industryActivityProducts'  },
+    ];
+    const SDE_TOTAL_PHASES = 1 + SDE_STEPS.length; // prepare + 5 steps
+
+    function sdeSetStatus(text)  {
+      clearInterval(window._sdeEllipsisTimer);
+      const $el = $('#ett-sde-progress-status');
+      $el.text(text);
+      let dots = 0;
+      window._sdeEllipsisTimer = setInterval(function () {
+        dots = (dots + 1) % 4;
+        $el.text(text + '.'.repeat(dots));
+      }, 500);
+    }
+    function sdeStopEllipsis(finalText) {
+      clearInterval(window._sdeEllipsisTimer);
+      if (finalText !== undefined) $('#ett-sde-progress-status').text(finalText);
+    }
+    function sdeSetPct(pct)      { $('#ett-sde-progress-bar').css('width', Math.round(pct) + '%'); }
+    function sdeLog(text, ok)    {
+      const colour = ok === false ? '#b32d2e' : ok === true ? '#1d8348' : '#444';
+      $('#ett-sde-progress-log').append(
+        $('<li>').text(text).css('color', colour)
+      );
+    }
+
+    function sdeShowProgress() { $('#ett-sde-progress').show(); }
+    function sdeHideProgress() { $('#ett-sde-progress').hide(); }
+
+    function sdeReset() {
+      sdeSetStatus('');
+      sdeSetPct(0);
+      $('#ett-sde-progress-log').empty();
+    }
+
+    function sdeLockForms(lock) {
+      $('#ett-sde-upload-form, #ett-sde-path-form')
+        .find('input, button')
+        .prop('disabled', lock);
+    }
+
+    async function sdeCleanup(token) {
+      if (!token) return;
+      try {
+        await $.post(ETT_ADMIN.ajax_url, {
+          action: 'ett_sde_cleanup',
+          token:  token,
+          _ajax_nonce: ETT_ADMIN.nonce,
+        });
+      } catch (_) { /* best-effort */ }
+    }
+
+    async function sdeRunImport(prepareRequest) {
+      sdeReset();
+      sdeShowProgress();
+      sdeLockForms(true);
+
+      let token = null;
+
+      try {
+        // ── Phase 0: prepare ──────────────────────────────────────────────
+        sdeSetStatus('Uploading ZIP…');
+        sdeSetPct(0);
+
+        const prepRes = await prepareRequest();
+        if (!prepRes || !prepRes.success) {
+          throw new Error((prepRes && prepRes.data) ? prepRes.data : 'Prepare step failed.');
+        }
+
+        token = prepRes.data.token;
+        const filename = prepRes.data.filename || 'SDE ZIP';
+        sdeLog('✓ ' + filename + ' uploaded and ready', true);
+        sdeSetPct((1 / SDE_TOTAL_PHASES) * 100);
+
+        // ── Phases 1–5: one YAML file each ───────────────────────────────
+        for (let i = 0; i < SDE_STEPS.length; i++) {
+          const stepNum  = i + 1;
+          const stepInfo = SDE_STEPS[i];
+
+          sdeSetStatus('Importing ' + stepInfo.file + '… (' + stepNum + '/' + SDE_STEPS.length + ')');
+
+          const stepRes = await $.post(ETT_ADMIN.ajax_url, {
+            action: 'ett_sde_import_step',
+            step:   stepNum,
+            token:  token,
+            _ajax_nonce: ETT_ADMIN.nonce,
+          });
+
+          if (!stepRes || !stepRes.success) {
+            throw new Error((stepRes && stepRes.data) ? stepRes.data : 'Step ' + stepNum + ' failed.');
+          }
+
+          const d     = stepRes.data;
+          const count = typeof d.meta_count !== 'undefined'
+            ? number_format(d.count) + ' types / ' + number_format(d.meta_count) + ' meta'
+            : number_format(d.count) + ' rows';
+          sdeLog('✓ ' + stepInfo.label + ': ' + count, true);
+          sdeSetPct(((1 + stepNum) / SDE_TOTAL_PHASES) * 100);
+
+          // Final step carries the summary back.
+          if (stepNum === SDE_STEPS.length) {
+            if (d.imported_at) $('#ett-last-import').text(d.imported_at);
+            if (d.details_txt) {
+              $('#ett-last-import-details').text(d.details_txt);
+              $('#ett-last-import-details-wrap').show();
+            }
+          }
+        }
+
+        sdeStopEllipsis('Import complete.');
+
+        // Refresh the market-group tree so it populates without a page reload.
+        try {
+          const treeRes = await $.post(ETT_ADMIN.ajax_url, {
+            action:      'ett_market_tree_ajax',
+            _ajax_nonce: ETT_ADMIN.nonce,
+          });
+          if (treeRes && treeRes.success && treeRes.data && treeRes.data.html) {
+            $('#ett-mg-tree').html(treeRes.data.html);
+            // Re-enable the Generate TypeIDs button if it was disabled.
+            $('#ett-btn-generate').prop('disabled', false);
+          }
+        } catch (_) { /* non-fatal — user can refresh manually */ }
+
+      } catch (err) {
+        sdeStopEllipsis('Import failed.');
+        sdeLog('✗ ' + (err.message || String(err)), false);
+      } finally {
+        await sdeCleanup(token);
+        sdeLockForms(false);
+      }
+    }
+
+    function number_format(n) {
+      return parseInt(n, 10).toLocaleString();
+    }
+
+    // ── Upload form ───────────────────────────────────────────────────────
+    $('#ett-sde-upload-form').on('submit', function (e) {
+      e.preventDefault();
+      const $fileInput = $('#ett-sde-zip');
+      const file = $fileInput[0] && $fileInput[0].files && $fileInput[0].files[0];
+      if (!file) { alert('Please choose a ZIP file first.'); return; }
+
+      sdeRunImport(function () {
+        const fd = new FormData();
+        fd.append('action',      'ett_sde_prepare');
+        fd.append('source',      'upload');
+        fd.append('sde_zip',     file);
+        fd.append('_ajax_nonce', ETT_ADMIN.nonce);
+
+        return fetch(ETT_ADMIN.ajax_url, { method: 'POST', body: fd })
+          .then(function (r) { return r.json(); });
+      });
+    });
+
+    // ── Server-path form ──────────────────────────────────────────────────
+    $('#ett-sde-path-form').on('submit', function (e) {
+      e.preventDefault();
+      const path = ($('#ett-sde-zip-path').val() || '').trim();
+      if (!path) { alert('Please enter a server-side file path.'); return; }
+
+      sdeRunImport(function () {
+        return $.post(ETT_ADMIN.ajax_url, {
+          action:      'ett_sde_prepare',
+          source:      'path',
+          zip_path:    path,
+          _ajax_nonce: ETT_ADMIN.nonce,
+        });
+      });
+    });
+
     // SSO settings (no page refresh)
     $('#ett-sso-form').on('submit', async function(e){
       e.preventDefault();
@@ -1502,48 +1701,6 @@
     				$('#ett-next-run').text(res.data.next_txt);
     			}
     			btnFlashSaved($btn, originalLabel);
-    		} else {
-    			btnFlashError($btn, originalLabel);
-    		}
-    	} catch (err){
-    		btnFlashError($btn, originalLabel);
-    	}
-    });
-
-    $('#ett-fuzzwork-form').on('submit', async function(e){
-    	e.preventDefault();
-
-    	const $form = $(this);
-    	const $btn = $form.find('input[type="submit"], button[type="submit"]').first();
-    	const originalLabel = btnGetLabel($btn);
-
-    	$btn.prop('disabled', true);
-    	btnSetLabel($btn, 'Importing...');
-
-    	try {
-    		const res = await ajax('POST', {
-    			action: 'ett_import_fuzzwork_ajax',
-    			_ajax_nonce: ETT_ADMIN.nonce
-    		});
-
-    		if (res && res.success){
-    			if (res.data && typeof res.data.imported_at === 'string'){
-    				$('#ett-last-import').text(res.data.imported_at);
-    			}
-    			if (res.data && typeof res.data.details_txt === 'string'){
-    				$('#ett-last-import-details').text(res.data.details_txt);
-    				if (res.data.details_txt.trim() !== ''){
-    					$('#ett-last-import-details-wrap').show();
-    				} else {
-    					$('#ett-last-import-details-wrap').hide();
-    				}
-    			}
-
-    			btnSetLabel($btn, 'Import successful');
-    			setTimeout(() => {
-    				btnSetLabel($btn, originalLabel);
-    				$btn.prop('disabled', false);
-    			}, 1500);
     		} else {
     			btnFlashError($btn, originalLabel);
     		}
