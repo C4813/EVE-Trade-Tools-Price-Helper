@@ -74,8 +74,8 @@ $options = [
     'ett_batch_max_pages',
     'ett_batch_max_seconds',
 
-    // Fuzzwork import meta
-    'ett_fuzzwork_last_import_meta',
+    // SDE import meta
+    'ett_sde_last_import_meta',
 
     // Scheduler + last run meta
     'ett_last_price_run_completed_at',
