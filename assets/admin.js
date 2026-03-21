@@ -77,7 +77,7 @@
 
 		if (delta <= 15000){
 			dot.removeClass('bad warn').addClass('ok');
-			txt.text('Heartbeat OK');
+			txt.text('Heartbeat: OK');
 			return;
 		}
 
@@ -119,10 +119,14 @@
 		}
 
 		const histMsg = (progress.last_msg || '—').replace(
-			/^Hub\s+([a-z0-9_]+):/i,
+			/^Hub\s+([a-z0-9_-]+):/i,
 			(m, key) => 'Hub ' + hubLabel(key) + ':'
 		);
-		$('#ett-history-msg').text(histMsg);
+		const $histMsgEl = $('#ett-history-msg');
+		$histMsgEl.text(histMsg);
+		// Orange text when rate-limiting or transient errors are active
+		const histWarn = progress.rate_limited_seen || progress.warning_msg;
+		$histMsgEl.css('color', histWarn ? '#dba617' : '');
 		$('#ett-history-kpi-hub').text(progress.current_region ? hubLabel(progress.current_region) : '—');
 		$('#ett-history-kpi-done').text(fmtInt(progress.items_done));
 		$('#ett-history-kpi-total').text(fmtInt(progress.items_total));
@@ -288,7 +292,7 @@
         // Record local receipt time to avoid server/browser timezone mismatch
         lastHeartbeatMs = Date.now();
         dot.removeClass('bad warn').addClass('ok');
-        txt.text('Heartbeat OK');
+        txt.text('Heartbeat: OK');
         $('#ett-stalled').hide();
 	}
 
@@ -301,7 +305,7 @@
     
         if (delta <= 15000){
             dot.removeClass('bad warn').addClass('ok');
-            txt.text('Heartbeat OK');
+            txt.text('Heartbeat: OK');
             $('#ett-stalled').hide();
             return;
         }
@@ -471,7 +475,16 @@
 			hek: 'Hek'
 		};
 
-		return map[hubKey] || (hubKey.charAt(0).toUpperCase() + hubKey.slice(1));
+		if (map[hubKey]) return map[hubKey];
+
+		// Dynamic private hub labels passed from PHP (covers both 'private_hub_N'
+		// and the sanitized system-name key like 'c-n4od').
+		const dynamic = (typeof ETT_ADMIN !== 'undefined' && ETT_ADMIN.private_hub_labels) ? ETT_ADMIN.private_hub_labels : {};
+		if (dynamic[hubKey]) return dynamic[hubKey];
+
+		// Fallback: return the key as stored — no case transformation, since
+		// canonical casing should always be present via the dynamic map.
+		return hubKey;
 	}
 
 	function renderProgress(progress){
@@ -525,10 +538,10 @@
 		$('#ett-kpi-written').text(fmtInt(progress.rows_written));
 
 		let msg = progress.last_msg || '—';
-		msg = msg.replace(/^Hub\s+([a-z0-9_]+)\s+Primary:/i, (m, key) => `Hub ${hubLabel(key)}:`);
-		msg = msg.replace(/^Hub\s+([a-z0-9_]+)\s+Secondary\s*\(([^)]+)\):/i, (m, key, sec) => `Hub ${hubLabel(key)} (Secondary - ${sec}):`);
-		msg = msg.replace(/^Hub\s+([a-z0-9_]+)\s+Tertiary\s*\(([^)]+)\):/i, (m, key, ter) => `Hub ${hubLabel(key)} (Tertiary - ${ter}):`);
-		msg = msg.replace(/^Hub\s+([a-z0-9_]+):/i, (m, key) => `Hub ${hubLabel(key)}:`);
+		msg = msg.replace(/^Hub\s+([a-z0-9_-]+)\s+Primary:/i,                          (m, key) => `Hub ${hubLabel(key)}:`);
+		msg = msg.replace(/^Hub\s+([a-z0-9_-]+)\s+Secondary\s*\(([^)]+)\):/i,          (m, key, sec) => `Hub ${hubLabel(key)} (Secondary - ${sec}):`);
+		msg = msg.replace(/^Hub\s+([a-z0-9_-]+)\s+Tertiary\s*\(([^)]+)\):/i,           (m, key, ter) => `Hub ${hubLabel(key)} (Tertiary - ${ter}):`);
+		msg = msg.replace(/^Hub\s+([a-z0-9_-]+):/i,                                    (m, key) => `Hub ${hubLabel(key)}:`);
 
 		$('#ett-job-msg').text(msg);
 
@@ -1451,13 +1464,14 @@
     // Each phase updates the progress bar and appends a line to the log.
 
     const SDE_STEPS = [
-      { file: 'marketGroups.yaml',  label: 'invMarketGroups'           },
-      { file: 'metaGroups.yaml',    label: 'invMetaGroups'             },
-      { file: 'types.yaml',         label: 'invTypes + invMetaTypes'   },
-      { file: 'typeMaterials.yaml', label: 'invTypeMaterials'          },
-      { file: 'blueprints.yaml',    label: 'industryActivityProducts'  },
+      { file: 'marketGroups.yaml',   label: 'invMarketGroups',          optional: false },
+      { file: 'metaGroups.yaml',     label: 'invMetaGroups',            optional: false },
+      { file: 'types.yaml',          label: 'invTypes + invMetaTypes',  optional: false },
+      { file: 'typeMaterials.yaml',  label: 'invTypeMaterials',         optional: false },
+      { file: 'blueprints.yaml',     label: 'industryActivityProducts', optional: false },
+      { file: 'mapSolarSystems.yaml',label: 'mapSolarSystems',          optional: true  },
     ];
-    const SDE_TOTAL_PHASES = 1 + SDE_STEPS.length; // prepare + 5 steps
+    const SDE_TOTAL_PHASES = 1 + SDE_STEPS.length; // prepare + 6 steps
 
     function sdeSetStatus(text)  {
       clearInterval(window._sdeEllipsisTimer);
@@ -1529,7 +1543,7 @@
         sdeLog('✓ ' + filename + ' uploaded and ready', true);
         sdeSetPct((1 / SDE_TOTAL_PHASES) * 100);
 
-        // ── Phases 1–5: one YAML file each ───────────────────────────────
+        // ── Phases 1–6: one YAML file each ───────────────────────────────
         for (let i = 0; i < SDE_STEPS.length; i++) {
           const stepNum  = i + 1;
           const stepInfo = SDE_STEPS[i];
@@ -1547,11 +1561,17 @@
             throw new Error((stepRes && stepRes.data) ? stepRes.data : 'Step ' + stepNum + ' failed.');
           }
 
-          const d     = stepRes.data;
-          const count = typeof d.meta_count !== 'undefined'
-            ? number_format(d.count) + ' types / ' + number_format(d.meta_count) + ' meta'
-            : number_format(d.count) + ' rows';
-          sdeLog('✓ ' + stepInfo.label + ': ' + count, true);
+          const d = stepRes.data;
+
+          if (d.skipped) {
+            sdeLog('– ' + stepInfo.label + ': not found in ZIP (skipped)', null);
+          } else {
+            const count = typeof d.meta_count !== 'undefined'
+              ? number_format(d.count) + ' types / ' + number_format(d.meta_count) + ' meta'
+              : number_format(d.count) + ' rows';
+            sdeLog('✓ ' + stepInfo.label + ': ' + count, true);
+          }
+
           sdeSetPct(((1 + stepNum) / SDE_TOTAL_PHASES) * 100);
 
           // Final step carries the summary back.
@@ -2128,3 +2148,328 @@
 		});
 	});
 })();
+
+// ── Private Hubs ──────────────────────────────────────────────────────────
+(function ($) {
+    'use strict';
+
+    var ajaxUrl = (typeof ETT_ADMIN !== 'undefined') ? ETT_ADMIN.ajax_url : '/wp-admin/admin-ajax.php';
+    var nonce   = (typeof ETT_ADMIN !== 'undefined') ? ETT_ADMIN.nonce   : '';
+
+    function phAjax(action, data) {
+        data = $.extend({ action: action, _ajax_nonce: nonce }, data);
+        return $.ajax({ url: ajaxUrl, method: 'POST', dataType: 'json', data: data });
+    }
+
+    function escHtml(s) {
+        return String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Static EVE region ID → name map (region IDs are permanent)
+    var EVE_REGIONS = {
+        10000001:'Derelik',10000002:'The Forge',10000003:'Vale of the Silent',10000005:'Detorid',
+        10000006:'Wicked Creek',10000007:'Cache',10000008:'Scalding Pass',10000009:'Insmother',
+        10000010:'Tribute',10000011:'Great Wildlands',10000012:'Curse',10000014:'Catch',
+        10000015:'Venal',10000016:'Lonetrek',10000018:'The Spire',10000019:'A821-A',
+        10000020:'Tash-Murkon',10000022:'Stain',10000023:'Pure Blind',10000025:'Immensea',
+        10000027:'Etherium Reach',10000028:'Molden Heath',10000029:'Geminate',10000030:'Heimatar',
+        10000031:'Impass',10000032:'Sinq Laison',10000033:'The Citadel',10000034:'The Kalevala Expanse',
+        10000035:'Deklein',10000036:'Devoid',10000037:'Everyshore',10000038:'The Bleak Lands',
+        10000039:'Esoteria',10000040:'Oasa',10000041:'Syndicate',10000042:'Metropolis',
+        10000043:'Domain',10000044:'Solitude',10000045:'Tenal',10000046:'Fade',
+        10000047:'Providence',10000048:'Placid',10000049:'Khanid',10000050:'Querious',
+        10000051:'Cloud Ring',10000052:'Kador',10000054:'Aridia',10000055:'Branch',
+        10000056:'Feythabolis',10000057:'Omist',10000058:'Fountain',10000059:'Paragon Soul',
+        10000060:'Delve',10000061:'Tenerifis',10000062:'Period Basis',10000063:'Malpais',
+        10000064:'Outer Passage',10000065:'Esoteria',10000066:'Perrigen Falls',10000067:'Genesis',
+        10000068:'Cobalt Edge',10000069:'Black Rise',
+        11000001:'A-R00001',11000002:'B-R00002',11000003:'C-R00003',11000004:'D-R00004',
+        11000005:'E-R00005',11000006:'F-R00006',11000007:'G-R00007',11000008:'H-R00008',
+        11000009:'I-R00009',11000010:'J-R00010',11000011:'K-R00011',11000012:'L-R00012',
+        11000013:'M-R00013',11000014:'N-R00014',11000015:'O-R00015',11000016:'P-R00016',
+        11000017:'Q-R00017',11000018:'R-R00018',11000019:'S-R00019',11000020:'T-R00020',
+        11000021:'U-R00021',11000022:'V-R00022',11000023:'W-R00023',11000024:'X-R00024',
+        11000025:'Y-R00025',11000026:'Z-R00026',11000027:'A-R00027',11000028:'B-R00028',
+        11000029:'C-R00029',11000030:'D-R00030',
+        12000001:'Pochven',
+    };
+    function eveRegionName(id) {
+        var n = EVE_REGIONS[parseInt(id, 10)];
+        return n || ('Region ' + id);
+    }
+
+    // ── System autocomplete ───────────────────────────────────────────────
+    var acTimer = null;
+
+    $(document).on('input', '.ett-system-search', function () {
+        var $input = $(this);
+        var $list  = $input.siblings('.ett-system-autocomplete');
+        var $idField = $input.siblings('.ett-system-id');
+        clearTimeout(acTimer);
+        $idField.val('');
+        var q = $input.val().trim();
+        if (q.length < 1) { $list.hide().empty(); return; }
+
+        acTimer = setTimeout(function () {
+            phAjax('ett_system_search', { q: q })
+                .then(function (res) {
+                    if (!res || !res.success || !res.data.systems.length) {
+                        $list.hide().empty();
+                        return;
+                    }
+                    var html = '';
+                    res.data.systems.forEach(function (s) {
+                        html += '<li data-id="' + escHtml(s.solar_system_id) + '"'
+                             +  ' data-name="' + escHtml(s.name) + '"'
+                             +  ' data-region="' + escHtml(s.region_id) + '">'
+                             +  escHtml(s.name) + ' <span style="color:#888;font-size:0.85em;">(' + escHtml(eveRegionName(s.region_id)) + ')</span>'
+                             +  '</li>';
+                    });
+                    $list.html(html).show();
+                });
+        }, 250);
+    });
+
+    $(document).on('click', '.ett-system-autocomplete li', function () {
+        var $li      = $(this);
+        var $wrap    = $li.closest('.ett-system-search-wrap');
+        var $input   = $wrap.find('.ett-system-search');
+        var $idField = $wrap.find('.ett-system-id');
+        var $list    = $wrap.find('.ett-system-autocomplete');
+        var hubIdx   = $input.data('hub-index');
+        var regionId = $li.data('region');
+
+        $input.val($li.data('name'));
+        $idField.val($li.data('id'));
+        $list.hide().empty();
+
+        // Store region in a hidden field (create if missing)
+        var $regionField = $wrap.closest('.ett-private-hub-entry')
+                               .find('.ett-system-region-id');
+        if (!$regionField.length) {
+            $regionField = $('<input type="hidden" class="ett-system-region-id">');
+            $wrap.append($regionField);
+        }
+        $regionField.val(regionId);
+
+        // Enable Fetch Structures button
+        $wrap.closest('.ett-private-hub-entry')
+             .find('.ett-btn-fetch-structures')
+             .prop('disabled', false);
+    });
+
+    // Hide autocomplete when clicking outside
+    $(document).on('click', function (e) {
+        if (!$(e.target).closest('.ett-system-search-wrap').length) {
+            $('.ett-system-autocomplete').hide().empty();
+        }
+    });
+
+    // ── Fetch structures ──────────────────────────────────────────────────
+    $(document).on('click', '.ett-btn-fetch-structures', function () {
+        var $btn    = $(this);
+        var $entry  = $btn.closest('.ett-private-hub-entry');
+        var hubIdx  = $entry.data('hub-index');
+        var sysId   = $entry.find('.ett-system-id').val();
+        var sysName = $entry.find('.ett-system-search').val();
+        var charSrc = $entry.find('.ett-priv-char-source').val();
+
+        if (!sysId || !sysName) { alert('Select a system first.'); return; }
+
+        var origLabel = $btn.text();
+        $btn.prop('disabled', true).text('Fetching…');
+
+        phAjax('ett_priv_fetch_structures', {
+            hub_index:   hubIdx,
+            system_id:   sysId,
+            system_name: sysName,
+            char_source: charSrc
+        }).then(function (res) {
+            $btn.prop('disabled', false).text(origLabel);
+            var $structs = $entry.find('.ett-priv-structures');
+            if (!res || !res.success) {
+                $structs.html('<p class="ett-bad">Error: ' + escHtml((res && res.data) ? res.data : 'Unknown error') + '</p>');
+                return;
+            }
+            var structures = res.data.structures || [];
+            if (!structures.length) {
+                $structs.html('<p class="description">No accessible structures found in this system for the selected character.</p>');
+                return;
+            }
+            var html = '<p class="description">Select which structures to include in the price pull:</p>'
+                     + '<ul class="ett-priv-structure-list">';
+            structures.forEach(function (st) {
+                html += '<li><label>'
+                     +  '<input type="checkbox" class="ett-priv-struct-check"'
+                     +  ' data-id="' + escHtml(st.id) + '"'
+                     +  ' data-name="' + escHtml(st.name) + '">'
+                     +  ' ' + escHtml(st.name)
+                     +  ' <span class="ett-id">(' + escHtml(st.id) + ')</span>'
+                     +  '</label></li>';
+            });
+            html += '</ul>';
+            $structs.html(html);
+        }).catch(function () {
+            $btn.prop('disabled', false).text(origLabel);
+        });
+    });
+
+    // ── Save hub ──────────────────────────────────────────────────────────
+    $(document).on('click', '.ett-btn-save-private-hub', function () {
+        var $btn   = $(this);
+        var $entry = $btn.closest('.ett-private-hub-entry');
+        var hubIdx = $entry.data('hub-index');
+
+        var sysName  = $entry.find('.ett-system-search').val().trim();
+        var sysId    = parseInt($entry.find('.ett-system-id').val(), 10) || 0;
+        var regionId = parseInt($entry.find('.ett-system-region-id').val(), 10) || 0;
+        var charSrc  = $entry.find('.ett-priv-char-source').val();
+
+        // Collect structures
+        var structures = [];
+        $entry.find('.ett-priv-struct-check').each(function () {
+            var $cb = $(this);
+            structures.push({
+                id:      $cb.data('id'),
+                name:    $cb.data('name'),
+                enabled: $cb.is(':checked') ? 1 : 0
+            });
+        });
+        // Also collect already-saved checkboxes rendered by PHP
+        $entry.find('input[name*="[structures]["]').each(function () {
+            var $cb   = $(this);
+            var idMatch = $cb.attr('name').match(/\[structures\]\[(\d+)\]/);
+            if (!idMatch) return;
+            var sid = parseInt(idMatch[1], 10);
+            if (structures.find(function (s) { return parseInt(s.id, 10) === sid; })) return;
+            structures.push({ id: sid, name: '', enabled: $cb.is(':checked') ? 1 : 0 });
+        });
+
+        var origLabel = $btn.text();
+        $btn.prop('disabled', true).text('Saving…');
+
+        phAjax('ett_priv_save_hub', {
+            hub_index:   hubIdx,
+            system_name: sysName,
+            system_id:   sysId,
+            region_id:   regionId,
+            char_source: charSrc,
+            structures:  structures
+        }).then(function (res) {
+            $btn.prop('disabled', false);
+            if (res && res.success) {
+                $btn.text('Saved!');
+                setTimeout(function () { $btn.text(origLabel); }, 2000);
+            } else {
+                $btn.text('Error');
+                setTimeout(function () { $btn.text(origLabel); }, 2000);
+            }
+        }).catch(function () {
+            $btn.prop('disabled', false).text(origLabel);
+        });
+    });
+
+    // ── Remove hub ────────────────────────────────────────────────────────
+    $(document).on('click', '.ett-btn-remove-private-hub', function () {
+        var $btn   = $(this);
+        var hubIdx = $btn.data('hub-index');
+        if (!confirm('Remove Private Hub ' + hubIdx + '? This cannot be undone.')) return;
+
+        $btn.prop('disabled', true);
+        phAjax('ett_priv_remove_hub', { hub_index: hubIdx })
+            .then(function (res) {
+                if (res && res.success) {
+                    $btn.closest('.ett-private-hub-entry').remove();
+                } else {
+                    $btn.prop('disabled', false);
+                    alert('Failed to remove hub.');
+                }
+            }).catch(function () { $btn.prop('disabled', false); });
+    });
+
+    // ── Add hub ───────────────────────────────────────────────────────────
+    $('#ett-btn-add-private-hub').on('click', function () {
+        var $btn = $(this);
+        $btn.prop('disabled', true).text('Adding…');
+
+        phAjax('ett_priv_add_hub', {})
+            .then(function (res) {
+                $btn.prop('disabled', false).text('+ Add Private Hub');
+                if (!res || !res.success) { alert('Failed to add hub.'); return; }
+
+                var idx      = res.data.hub_index;
+                var authed   = res.data.sso_authed;
+                var primName = res.data.primary_char_name || '';
+                var nonce    = res.data.nonce;
+                var startUrl = res.data.priv_start_url;
+
+                var primLabel = 'Use primary SSO character' + (primName ? ' (' + escHtml(primName) + ')' : '');
+
+                var html = '<div class="ett-private-hub-entry" data-hub-index="' + idx + '">'
+                    + '<div class="ett-private-hub-header">'
+                    +   '<strong>Private Hub ' + idx + '</strong>'
+                    +   '<button type="button" class="button ett-btn-remove-private-hub" data-hub-index="' + idx + '">Remove</button>'
+                    + '</div>'
+                    + '<div class="ett-row">'
+                    +   '<label>Market Character</label>'
+                    +   '<select class="ett-priv-char-source" name="ett_private_hub[' + idx + '][char_source]">'
+                    +     '<option value="primary" selected>' + primLabel + '</option>'
+                    +     '<option value="private">Use a separate private character</option>'
+                    +   '</select>'
+                    + '</div>'
+                    + '<div class="ett-priv-auth-section" style="display:none;">'
+                    +   '<div class="ett-mt-8">'
+                    +     '<div class="ett-status ett-sso-status ett-bad"><strong>Status:</strong> No private character authenticated.</div>'
+                    +     '<form method="post" action="' + escHtml(startUrl) + '" class="ett-mt-10">'
+                    +       '<input type="hidden" name="action" value="ett_priv_sso_start">'
+                    +       '<input type="hidden" name="hub_index" value="' + idx + '">'
+                    +       '<input type="hidden" name="_wpnonce" value="' + escHtml(nonce) + '">'
+                    +       '<button type="submit" class="button button-primary"'
+                    +         (authed ? '' : ' disabled') + '>Connect Private Character</button>'
+                    +     '</form>'
+                    +   '</div>'
+                    + '</div>'
+                    + '<div class="ett-row ett-mt-10">'
+                    +   '<label>System Name</label>'
+                    +   '<div class="ett-system-search-wrap" style="position:relative;display:inline-block;">'
+                    +     '<input type="text" class="ett-system-search regular-text"'
+                    +       ' name="ett_private_hub[' + idx + '][system_name]" value="" placeholder="e.g. C-N4OD"'
+                    +       ' autocomplete="off" data-hub-index="' + idx + '">'
+                    +     '<input type="hidden" class="ett-system-id" name="ett_private_hub[' + idx + '][system_id]" value="">'
+                    +     '<ul class="ett-system-autocomplete" style="display:none;"></ul>'
+                    +   '</div>'
+                    +   ' <button type="button" class="button ett-btn-fetch-structures" data-hub-index="' + idx + '" disabled>'
+                    +     'Fetch Structures'
+                    +   '</button>'
+                    + '</div>'
+                    + '<div class="ett-priv-structures" data-hub-index="' + idx + '">'
+                    +   '<p class="description">Enter a system name and click &ldquo;Fetch Structures&rdquo;.</p>'
+                    + '</div>'
+                    + '<div class="ett-actions ett-mt-10">'
+                    +   '<button type="button" class="button button-primary ett-btn-save-private-hub" data-hub-index="' + idx + '">'
+                    +     'Save Hub ' + idx
+                    +   '</button>'
+                    + '</div>'
+                    + '<hr style="margin:16px 0 0;">'
+                    + '</div>';
+
+                $('#ett-private-hub-list').append(html);
+            }).catch(function () {
+                $btn.prop('disabled', false).text('+ Add Private Hub');
+            });
+    });
+
+    // ── Show/hide private auth section based on char source ───────────────
+    $(document).on('change', '.ett-priv-char-source', function () {
+        var $entry = $(this).closest('.ett-private-hub-entry');
+        var $auth  = $entry.find('.ett-priv-auth-section');
+        if ($(this).val() === 'private') {
+            $auth.show();
+        } else {
+            $auth.hide();
+        }
+    });
+
+}(jQuery));
