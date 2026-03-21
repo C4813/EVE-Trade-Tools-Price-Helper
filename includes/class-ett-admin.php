@@ -416,7 +416,7 @@ class ETT_Admin {
 	 */
 	private static function parse_readme_changelog(string $path): string {
 		$text = (string) file_get_contents($path); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-		if (!preg_match('/== Changelog ==\r?\n(.*?)(?:== |\z)/s', $text, $m)) {
+		if (!preg_match('/== Changelog ==\r?\n(.*?)(?:\r?\n== |\z)/s', $text, $m)) {
 			return '';
 		}
 		$lines  = preg_split('/\r?\n/', trim($m[1]));
