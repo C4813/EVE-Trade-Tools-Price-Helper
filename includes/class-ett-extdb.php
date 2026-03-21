@@ -199,6 +199,14 @@ class ETT_ExternalDB {
 			KEY fetched_at (fetched_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_mapSolarSystems (
+			solar_system_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+			name VARCHAR(100) NOT NULL,
+			region_id BIGINT UNSIGNED NOT NULL,
+			KEY name (name),
+			KEY region_id (region_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
 		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_jobs (
 			job_id CHAR(36) NOT NULL PRIMARY KEY,
 			job_type VARCHAR(32) NOT NULL,
