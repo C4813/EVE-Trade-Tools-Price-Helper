@@ -337,10 +337,8 @@ class ETT_Jobs {
 
 		$selected_hubs = get_option(ETT_Admin::OPT_SELECTED_HUBS, array_keys($hubs));
 		$selected_hubs = array_values(array_intersect($selected_hubs, array_keys($hubs)));
-
-        if (empty($selected_hubs)) {
-            $selected_hubs = array_keys($hubs);
-        }
+		// Intentionally no fallback here — if the user has deselected all standard hubs,
+		// respect that. Private hubs (appended below) may still produce a valid run.
 
 		$secondary_map = get_option(ETT_Admin::OPT_SECONDARY_STRUCTURES, []);
 		if (!is_array($secondary_map)) $secondary_map = [];
@@ -349,6 +347,33 @@ class ETT_Jobs {
 		if (!is_array($tertiary_map)) $tertiary_map = [];
 
 		$secondary_pairs = ETT_Admin::secondary_pairs();
+
+		// Private hubs: build a list of hub entries keyed by 'private_hub_N'
+		$private_hub_configs = ETT_Admin::get_private_hubs();
+		$private_hubs_map    = []; // hub_key => ['system_name','system_id','region_id','structure_ids','char_source','hub_index']
+		foreach ($private_hub_configs as $ph) {
+			$idx         = (int) ($ph['hub_index'] ?? 0);
+			$system_id   = (int) ($ph['system_id'] ?? 0);
+			$system_name = (string) ($ph['system_name'] ?? '');
+			$region_id   = (int) ($ph['region_id'] ?? 0);
+			$structures  = is_array($ph['structures'] ?? null) ? $ph['structures'] : [];
+			$enabled_ids = [];
+			foreach ($structures as $st) {
+				if (!empty($st['enabled']) && !empty($st['id'])) {
+					$enabled_ids[] = (int) $st['id'];
+				}
+			}
+			if ($idx <= 0 || $system_id <= 0 || $region_id <= 0 || empty($enabled_ids)) continue;
+			$hub_key = 'private_hub_' . $idx;
+			$private_hubs_map[$hub_key] = [
+				'hub_index'      => $idx,
+				'system_name'    => $system_name,
+				'system_id'      => $system_id,
+				'region_id'      => $region_id,
+				'structure_ids'  => $enabled_ids,
+				'char_source'    => (string) ($ph['char_source'] ?? 'primary'),
+			];
+		}
 
 		if (($progress['phase'] ?? '') === 'init') {
 			$type_count = ETT_TypeIDs::count($pdo);
@@ -364,21 +389,27 @@ class ETT_Jobs {
 			// which consumers can use to detect stale data. This avoids a window where the table
 			// is empty/incomplete while a run is in progress.
 
+			$all_hubs_for_run = $selected_hubs;
+			foreach (array_keys($private_hubs_map) as $ph_key) {
+				$all_hubs_for_run[] = $ph_key;
+			}
+
 			$progress = [
 			    'driver' => $progress['driver'] ?? 'browser',
 				'phase' => 'hub',
 				'source' => 'primary',
 				'secondary_map' => $secondary_map,
 				'tertiary_map' => $tertiary_map,
+				'private_hubs_map' => $private_hubs_map,
 				'job_type' => 'prices',
-				'hubs' => $selected_hubs,
+				'hubs' => $all_hubs_for_run,
 				'hub_index' => 0,
 				'page' => 1,
 				'type_ids_total' => $type_count,
 				'orders_seen' => 0,
 				'matched_orders' => 0,
 				'rows_written' => 0,
-				'current_hub' => $selected_hubs[0] ?? null,
+				'current_hub' => $all_hubs_for_run[0] ?? null,
 				'last_msg' => 'Starting price pull',
 				'warning_msg' => null,
 				'rate_limited_seen' => false,
@@ -411,7 +442,14 @@ class ETT_Jobs {
         	$progress['last_msg'] = 'Hub data complete. Fetching adjusted prices…';
         	return $progress;
         }
-        
+
+        // ── Private hub branch ────────────────────────────────────────────
+        $private_hubs_map = is_array($progress['private_hubs_map'] ?? null) ? $progress['private_hubs_map'] : [];
+        if (isset($private_hubs_map[$hub_key])) {
+        	return self::step_prices_private_hub($pdo, $progress, $job_id, $hub_key, $private_hubs_map[$hub_key]);
+        }
+        // ── Standard hub branch ───────────────────────────────────────────
+
 		$hub = $hubs[$hub_key];
 		$region_id = (int)$hub['region_id'];
 		$station_id = (int)$hub['station_id'];
@@ -830,6 +868,189 @@ class ETT_Jobs {
 		return $job_id;
 	}
 
+	/**
+	 * Handle one price-fetch step for a private hub (a user-defined citadel system).
+	 * Iterates through each enabled structure_id for this hub, fetching all pages.
+	 * Uses 'priv_struct_index' and 'page' in progress to track position.
+	 * Prices are written to ett_prices using the sanitized system name as hub_key
+	 * (e.g. 'c-n4od') so the key is human-readable and consistent with what
+	 * ETT Reprocess Trading reads from DISTINCT hub_key in that table.
+	 *
+	 * @param array $ph_config ['hub_index','system_id','system_name','region_id','structure_ids','char_source']
+	 */
+	private static function step_prices_private_hub(PDO $pdo, array $progress, string $job_id, string $hub_key, array $ph_config): array {
+		$idx          = (int) $ph_config['hub_index'];
+		$region_id    = (int) $ph_config['region_id'];
+		$structure_ids = array_values(array_map('intval', $ph_config['structure_ids'] ?? []));
+		$char_source  = (string) ($ph_config['char_source'] ?? 'primary');
+
+		// The key written to ett_prices uses the system name (e.g. 'c-n4od'), not 'private_hub_N',
+		// so it's human-readable and matches what ETT Reprocess Trading will display.
+		$price_hub_key = sanitize_key((string) ($ph_config['system_name'] ?? $hub_key));
+
+		// Always update current_hub so the job progress card reflects the active hub.
+		// Use the internal 'private_hub_N' key — JS hubLabel() maps it to the display name.
+		$progress['current_hub'] = $hub_key;
+
+		// Label used in last_msg — internal key so JS hubLabel() translates it.
+		$hub_label_for_msg = $hub_key;
+
+		if (empty($structure_ids)) {
+			$progress['hub_index']++;
+			$progress['page']   = 1;
+			$progress['source'] = 'primary';
+			$progress['last_msg'] = "Hub {$hub_label_for_msg}: skipped — no enabled structures";
+			return $progress;
+		}
+
+		// Get SSO token
+		if ($char_source === 'private') {
+			$tok = ETT_Admin::get_private_hub_access_token($idx);
+		} else {
+			$tok = ETT_Admin::get_access_token_for_jobs();
+		}
+
+		if (empty($tok['ok'])) {
+			if (!is_array($progress['warnings'] ?? null)) $progress['warnings'] = [];
+			$progress['warnings'][] = "Skipped {$price_hub_key}: SSO not connected/refreshable.";
+			$progress['hub_index']++;
+			$progress['page']   = 1;
+			$progress['source'] = 'primary';
+			$progress['last_msg'] = "Hub {$hub_label_for_msg}: skipped (SSO not connected)";
+			return $progress;
+		}
+		$access = $tok['access'];
+
+		// Track which structure we're on within this hub
+		$struct_index = (int) ($progress['priv_struct_index'] ?? 0);
+		$page         = max(1, (int) ($progress['page'] ?? 1));
+
+		if ($struct_index >= count($structure_ids)) {
+			// Done all structures for this private hub
+			$progress['hub_index']++;
+			$progress['page']             = 1;
+			$progress['priv_struct_index'] = 0;
+			$progress['source']           = 'primary';
+			$progress['last_msg']         = "Hub {$hub_label_for_msg}: finished";
+			return $progress;
+		}
+
+		$structure_id = $structure_ids[$struct_index];
+		$esi          = ETT_ESI::structure_orders_page($structure_id, $page, $access);
+
+		if (!empty($esi['rate_limited'])) {
+			$retry = max(1, (int) ($esi['retry_after'] ?? 5));
+			$progress['rate_limited_seen'] = true;
+			$progress['sleep_until']       = time() + $retry;
+			$progress['last_msg']          = "Hub {$hub_label_for_msg}: rate limited, backing off {$retry}s";
+			return $progress;
+		}
+
+		$code = (int) ($esi['code'] ?? 0);
+		if ($code === 401 || $code === 403) {
+			if (!is_array($progress['warnings'] ?? null)) $progress['warnings'] = [];
+			$progress['warnings'][] = "Structure {$structure_id} in {$price_hub_key} returned HTTP {$code} — skipped.";
+			$progress['priv_struct_index'] = $struct_index + 1;
+			$progress['page']              = 1;
+			$progress['last_msg']          = "Hub {$hub_label_for_msg}: structure {$structure_id} access denied (HTTP {$code}), skipping";
+			return $progress;
+		}
+
+		if (empty($esi['ok'])) {
+			$progress['sleep_until'] = time() + 5;
+			$progress['last_msg']    = "Hub {$hub_label_for_msg}: ESI error (HTTP {$code}), retrying in 5s";
+			return $progress;
+		}
+
+		$orders = $esi['orders'] ?? [];
+		$progress['sleep_until'] = 0;
+
+		if (empty($orders)) {
+			// End of pages for this structure — move to next
+			$progress['priv_struct_index'] = $struct_index + 1;
+			$progress['page']              = 1;
+			$progress['last_msg']          = "Hub {$hub_label_for_msg}: finished structure {$structure_id}";
+			return $progress;
+		}
+
+		// Load allowed type IDs
+		$allow = get_transient('ett_typeids_set_' . $job_id);
+		if (!is_array($allow) || empty($allow)) {
+			$type_ids = get_transient('ett_typeids_' . $job_id);
+			if (!is_array($type_ids) || empty($type_ids)) {
+				$type_ids = ETT_TypeIDs::all($pdo);
+				set_transient('ett_typeids_' . $job_id, $type_ids, 6 * HOUR_IN_SECONDS);
+			}
+			$allow = array_fill_keys(array_map('intval', $type_ids), true);
+			set_transient('ett_typeids_set_' . $job_id, $allow, 6 * HOUR_IN_SECONDS);
+		}
+
+		$sellMin = [];
+		$buyMax  = [];
+		$sellVol = [];
+		$buyVol  = [];
+
+		foreach ($orders as $order) {
+			if (!is_array($order)) continue;
+			$type_id  = (int) ($order['type_id'] ?? 0);
+			$price    = (float) ($order['price'] ?? 0);
+			$is_buy   = (bool) ($order['is_buy_order'] ?? false);
+			$volrem   = (int) ($order['volume_remain'] ?? 0);
+			if (!isset($allow[$type_id])) continue;
+
+			if ($is_buy) {
+				if (!isset($buyMax[$type_id]) || $price > $buyMax[$type_id]) $buyMax[$type_id] = $price;
+				$buyVol[$type_id] = ($buyVol[$type_id] ?? 0) + max(0, $volrem);
+			} else {
+				if (!isset($sellMin[$type_id]) || $price < $sellMin[$type_id]) $sellMin[$type_id] = $price;
+				$sellVol[$type_id] = ($sellVol[$type_id] ?? 0) + max(0, $volrem);
+			}
+		}
+
+		$now     = current_time('mysql');
+		$touched = array_unique(array_merge(array_keys($sellMin), array_keys($buyMax)));
+
+		// station_id for private hubs is the structure_id itself
+		$chunk_size = 200;
+		for ($offset = 0; $offset < count($touched); $offset += $chunk_size) {
+			$chunk = array_slice($touched, $offset, $chunk_size);
+			if (empty($chunk)) continue;
+
+			$values = [];
+			$params = [];
+			foreach ($chunk as $tid) {
+				$values[] = '(?,?,?,?,?,?,?,?,?)';
+				$params[]  = $price_hub_key;
+				$params[]  = $region_id;
+				$params[]  = $structure_id;
+				$params[]  = $tid;
+				$params[]  = $sellMin[$tid] ?? null;
+				$params[]  = $buyMax[$tid]  ?? null;
+				$params[]  = $sellVol[$tid] ?? null;
+				$params[]  = $buyVol[$tid]  ?? null;
+				$params[]  = $now;
+			}
+
+			$sql  = "INSERT INTO ett_prices
+				(hub_key, region_id, station_id, type_id, sell_min, buy_max, sell_volume, buy_volume, fetched_at)
+				VALUES " . implode(",\n\t\t\t", $values) . "
+				ON DUPLICATE KEY UPDATE
+				sell_min = LEAST(COALESCE(sell_min, 999999999999.99), COALESCE(VALUES(sell_min), 999999999999.99)),
+				buy_max  = GREATEST(COALESCE(buy_max, 0), COALESCE(VALUES(buy_max), 0)),
+				sell_volume = COALESCE(sell_volume,0) + COALESCE(VALUES(sell_volume),0),
+				buy_volume  = COALESCE(buy_volume,0)  + COALESCE(VALUES(buy_volume),0),
+				fetched_at = VALUES(fetched_at)";
+
+			$stmt = $pdo->prepare($sql);
+			$stmt->execute($params);
+			$progress['rows_written'] += count($chunk);
+		}
+
+		$progress['page']     = $page + 1;
+		$progress['last_msg'] = "Hub {$hub_label_for_msg} Primary: processed page {$page}";
+		return $progress;
+	}
+
     private static function format_duration(int $secs) : string {
     	$secs = max(0, (int)$secs);
     	$h = intdiv($secs, 3600);
@@ -994,9 +1215,9 @@ class ETT_Jobs {
 		// ── Init phase: resolve regions + count type_ids ──────────────────
 		if (($progress['phase'] ?? 'init') === 'init') {
 			$selected_hubs = get_option(ETT_Admin::OPT_SELECTED_HUBS, []);
-			if (!is_array($selected_hubs) || empty($selected_hubs)) {
-				$selected_hubs = array_keys(ETT_Admin::hubs());
-			}
+			if (!is_array($selected_hubs)) $selected_hubs = [];
+			// No fallback — if all standard hubs are deselected, only private hub
+			// regions (added below) will be included in the history fetch.
 
 			$all_hubs    = ETT_Admin::hubs();
     		$regions     = [];
@@ -1008,6 +1229,27 @@ class ETT_Jobs {
     			$seen_region[$region_id] = true;
     			$regions[] = [
     				'hub_key'   => $hub_key,
+    				'region_id' => $region_id,
+    			];
+    		}
+
+    		// Also add regions for enabled private hubs
+    		$private_hub_configs = ETT_Admin::get_private_hubs();
+    		foreach ($private_hub_configs as $ph) {
+    			$idx         = (int) ($ph['hub_index'] ?? 0);
+    			$region_id   = (int) ($ph['region_id'] ?? 0);
+    			$system_name = (string) ($ph['system_name'] ?? '');
+    			$structures  = is_array($ph['structures'] ?? null) ? $ph['structures'] : [];
+    			$has_enabled = false;
+    			foreach ($structures as $st) {
+    				if (!empty($st['enabled'])) { $has_enabled = true; break; }
+    			}
+    			if ($idx <= 0 || $region_id <= 0 || !$has_enabled) continue;
+    			if (isset($seen_region[$region_id])) continue;
+    			$seen_region[$region_id] = true;
+    			$price_hub_key = sanitize_key($system_name ?: ('private_hub_' . $idx));
+    			$regions[] = [
+    				'hub_key'   => $price_hub_key,
     				'region_id' => $region_id,
     			];
     		}
