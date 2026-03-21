@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.8.0
+Stable tag: 1.8.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,6 +64,9 @@ No. The importer uses custom streaming line-by-line parsers that handle the SDE 
 marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
 
 == Changelog ==
+
+= 1.8.0.1 =
+* Fixed: Changelog tab stopped rendering after the first occurrence of `== ` anywhere in the content — including mid-line substrings such as `=== 5` in code examples. The section-boundary regex now requires `==` to be at the start of a line, so inline `==` in changelog text no longer truncates the output.
 
 = 1.8.0 =
 * Added: **Private Trade Hubs** — a new card below the Trade Hubs card allows one or more private market structures (alliance citadels, Upwell structures) to be configured as additional trade hubs. Each private hub has its own system name with autocomplete powered by `ett_mapSolarSystems`, an independent character authentication (either the primary SSO character or a dedicated private character), and a selectable list of accessible structures fetched live from ESI. Multiple private hubs are supported; each can be added or removed independently.
