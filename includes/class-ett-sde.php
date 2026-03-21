@@ -33,6 +33,11 @@ final class ETT_SDE {
 		'blueprints.yaml',
 	];
 
+	/** Optional files — imported if present, silently skipped if absent. */
+	const OPTIONAL_FILES = [
+		'mapSolarSystems.yaml',
+	];
+
 	// ── Public entry point ─────────────────────────────────────────────────
 
 	/**
@@ -67,13 +72,25 @@ final class ETT_SDE {
 				$entries[$file] = $entry;
 			}
 
+			// Optional files — skip silently if absent.
+			$optional_entries = [];
+			foreach (self::OPTIONAL_FILES as $file) {
+				$entry = self::find_entry($zip, $file);
+				if ($entry !== null) {
+					$optional_entries[$file] = $entry;
+				}
+			}
+
 			$mg_count  = self::import_market_groups($zip, $entries['marketGroups.yaml'], $pdo);
 			$mgg_count = self::import_meta_groups($zip, $entries['metaGroups.yaml'], $pdo);
 			$ty_counts = self::import_types($zip, $entries['types.yaml'], $pdo);
 			$itm_count = self::import_type_materials($zip, $entries['typeMaterials.yaml'], $pdo);
 			$bp_count  = self::import_blueprints($zip, $entries['blueprints.yaml'], $pdo);
+			$ss_count  = isset($optional_entries['mapSolarSystems.yaml'])
+				? self::import_solar_systems($zip, $optional_entries['mapSolarSystems.yaml'], $pdo)
+				: null;
 
-			return [
+			$result = [
 				'invMarketGroups'          => $mg_count,
 				'invMetaGroups'            => $mgg_count,
 				'invTypes'                 => $ty_counts['types'],
@@ -82,6 +99,10 @@ final class ETT_SDE {
 				'industryActivityProducts' => $bp_count,
 				'imported_at'              => gmdate('Y-m-d H:i:s') . ' UTC',
 			];
+			if ($ss_count !== null) {
+				$result['mapSolarSystems'] = $ss_count;
+			}
+			return $result;
 		} finally {
 			$zip->close();
 		}
@@ -89,11 +110,12 @@ final class ETT_SDE {
 
 	// ── Step labels (JS mirrors this order) ───────────────────────────────
 	const STEPS = [
-		1 => ['file' => 'marketGroups.yaml', 'label' => 'invMarketGroups'],
-		2 => ['file' => 'metaGroups.yaml',   'label' => 'invMetaGroups'],
-		3 => ['file' => 'types.yaml',        'label' => 'invTypes + invMetaTypes'],
-		4 => ['file' => 'typeMaterials.yaml','label' => 'invTypeMaterials'],
-		5 => ['file' => 'blueprints.yaml',   'label' => 'industryActivityProducts'],
+		1 => ['file' => 'marketGroups.yaml',    'label' => 'invMarketGroups',           'optional' => false],
+		2 => ['file' => 'metaGroups.yaml',       'label' => 'invMetaGroups',             'optional' => false],
+		3 => ['file' => 'types.yaml',            'label' => 'invTypes + invMetaTypes',   'optional' => false],
+		4 => ['file' => 'typeMaterials.yaml',    'label' => 'invTypeMaterials',          'optional' => false],
+		5 => ['file' => 'blueprints.yaml',       'label' => 'industryActivityProducts',  'optional' => false],
+		6 => ['file' => 'mapSolarSystems.yaml',  'label' => 'mapSolarSystems',           'optional' => true],
 	];
 
 	/**
@@ -118,6 +140,10 @@ final class ETT_SDE {
 			$info  = self::STEPS[$step];
 			$entry = self::find_entry($zip, $info['file']);
 			if ($entry === null) {
+				// Optional steps (e.g. mapSolarSystems.yaml) may legitimately be absent.
+				if (!empty($info['optional'])) {
+					return ['label' => $info['label'], 'count' => 0, 'skipped' => true];
+				}
 				throw new Exception(sprintf('"%s" not found in ZIP.', $info['file']));
 			}
 
@@ -131,6 +157,8 @@ final class ETT_SDE {
 				case 4: $count = self::import_type_materials($zip, $entry, $pdo);
 					return ['label' => $info['label'], 'count' => $count];
 				case 5: $count = self::import_blueprints($zip, $entry, $pdo);
+					return ['label' => $info['label'], 'count' => $count];
+				case 6: $count = self::import_solar_systems($zip, $entry, $pdo);
 					return ['label' => $info['label'], 'count' => $count];
 			}
 		} finally {
@@ -795,6 +823,104 @@ final class ETT_SDE {
 				}
 			}
 
+			self::flush_batch($pdo, $stmt, $batch, $count);
+		} finally {
+			fclose($stream); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		}
+
+		return $count;
+	}
+
+	// ── mapSolarSystems.yaml ──────────────────────────────────────────────
+
+	/**
+	 * Parse mapSolarSystems.yaml and populate ett_mapSolarSystems.
+	 *
+	 * Top-level structure (key = solarSystemID):
+	 *   30000001:
+	 *     name:
+	 *       en: Tanoo
+	 *     regionID: 10000001
+	 *     constellationID: ...  (ignored)
+	 *     ...
+	 */
+	private static function import_solar_systems(ZipArchive $zip, string $entry, PDO $pdo): int {
+		$pdo->exec('TRUNCATE TABLE ett_mapSolarSystems');
+
+		$stmt = $pdo->prepare(
+			'INSERT INTO ett_mapSolarSystems (solar_system_id, name, region_id)
+			 VALUES (:id, :name, :rid)'
+		);
+
+		$stream = self::open_stream($zip, $entry);
+		$count  = 0;
+		$batch  = [];
+
+		$cur_id   = null;
+		$cur      = null;
+		$section  = null;
+		$in_en    = false;
+
+		$flush_cur = function () use (&$cur_id, &$cur, $pdo, $stmt, &$batch, &$count): void {
+			if ($cur_id === null || $cur === null) return;
+			if ($cur['name'] === '' || $cur['region_id'] === 0) return;
+			$batch[] = [
+				':id'   => $cur_id,
+				':name' => $cur['name'],
+				':rid'  => $cur['region_id'],
+			];
+			if (count($batch) >= self::BATCH_SIZE) {
+				self::flush_batch($pdo, $stmt, $batch, $count);
+			}
+		};
+
+		try {
+			while (($line = fgets($stream)) !== false) {
+				$raw     = rtrim($line, "\r\n");
+				$indent  = strlen($raw) - strlen(ltrim($raw, ' '));
+				$content = ltrim($raw, ' ');
+
+				if ($content === '') { $in_en = false; continue; }
+
+				// 0-indent integer key → new solar system entry
+				if ($indent === 0 && preg_match('/^(\d+):/', $content, $m)) {
+					$flush_cur();
+					$cur_id  = (int) $m[1];
+					$cur     = ['name' => '', 'region_id' => 0];
+					$section = null;
+					$in_en   = false;
+					continue;
+				}
+
+				if ($cur_id === null) continue;
+
+				// 2-indent: direct scalar keys or section headers
+				if ($indent === 2 && preg_match('/^(\w+):\s*(.*)$/', $content, $m)) {
+					$key = $m[1];
+					$val = trim($m[2]);
+					$section = $key;
+					$in_en   = false;
+					if ($key === 'regionID' && $val !== '') {
+						$cur['region_id'] = (int) $val;
+					}
+					continue;
+				}
+
+				// 4-indent: language key inside name block
+				if ($indent === 4 && preg_match('/^(\w+):\s*(.*)$/', $content, $m)) {
+					$lang    = $m[1];
+					$val_raw = $m[2];
+					$in_en   = ($lang === 'en');
+					if ($in_en && $section === 'name') {
+						$cur['name'] = self::yaml_str($val_raw);
+					}
+					continue;
+				}
+
+				if ($indent <= 4) $in_en = false;
+			}
+
+			$flush_cur();
 			self::flush_batch($pdo, $stmt, $batch, $count);
 		} finally {
 			fclose($stream); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
