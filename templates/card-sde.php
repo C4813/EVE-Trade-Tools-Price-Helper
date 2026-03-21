@@ -32,25 +32,28 @@
 		to populate the required reference tables in the external database.
 	</p>
 
-	<p>The following files are extracted from the ZIP automatically (nested paths such as <code>sde/fsd/</code> are handled):</p>
+	<p>The following files are extracted from the ZIP automatically:</p>
 	<ul class="ett-list-disc">
 		<li><code>marketGroups.yaml</code> &rarr; <code>ett_invMarketGroups</code></li>
 		<li><code>metaGroups.yaml</code> &rarr; <code>ett_invMetaGroups</code></li>
 		<li><code>types.yaml</code> &rarr; <code>ett_invTypes</code> + <code>ett_invMetaTypes</code></li>
 		<li><code>typeMaterials.yaml</code> &rarr; <code>ett_invTypeMaterials</code></li>
 		<li><code>blueprints.yaml</code> &rarr; <code>ett_industryActivityProducts</code></li>
+		<li><code>mapSolarSystems.yaml</code> &rarr; <code>ett_mapSolarSystems</code> <span class="description">(required for private hub system search)</span></li>
 	</ul>
 
 	<p class="description">
 		This import is only required once after activation, and again whenever CCP releases an updated SDE.
 		All YAML files are parsed by a streaming line-by-line reader so memory use stays low even for the
-		largest files (types.yaml ~200&nbsp;MB, blueprints.yaml ~500&nbsp;MB uncompressed).
+		largest files (types.yaml and blueprints.yaml are several hundred&nbsp;MB uncompressed).
+		<code>mapSolarSystems.yaml</code> is optional &mdash; if absent from the ZIP, the other files still import normally.
 	</p>
 
 	<div class="notice notice-warning inline" style="margin:12px 0;">
 		<p>
-			<strong>Server requirements:</strong> The full SDE ZIP is ~1&nbsp;GB. Your server must allow large
-			uploads (<code>upload_max_filesize</code>, <code>post_max_size</code>) and a long execution window
+			<strong>Server requirements:</strong> The SDE ZIP is approximately 40&nbsp;MB compressed; individual files
+			are much larger when uncompressed. Your server must allow uploads of at least 50&nbsp;MB
+			(<code>upload_max_filesize</code>, <code>post_max_size</code>) and a long execution window
 			(<code>max_execution_time = 0</code> or equivalent). If your host imposes strict limits, download the SDE
 			ZIP directly to the server via SSH/FTP and enter its absolute path in the field below instead of uploading.
 		</p>
