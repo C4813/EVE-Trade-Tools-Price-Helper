@@ -92,8 +92,24 @@ $options = [
 
     // History/performance setting added in later versions
     'ett_history_batch_size',
+
+    // Private hubs config (added v1.8.0)
+    'ett_private_hubs',
 ];
 
 foreach ($options as $opt) {
     delete_option($opt);
+}
+
+// Per-private-hub token options (up to 20 hubs; each stores access/refresh tokens + char info).
+// Keys follow the pattern ett_priv_{part}_{index}[_{iv|mac}].
+for ($i = 1; $i <= 20; $i++) {
+    foreach (['access', 'refresh'] as $part) {
+        delete_option('ett_priv_' . $part . '_' . $i);
+        delete_option('ett_priv_' . $part . '_' . $i . '_iv');
+        delete_option('ett_priv_' . $part . '_' . $i . '_mac');
+    }
+    delete_option('ett_priv_expires_'   . $i);
+    delete_option('ett_priv_char_id_'   . $i);
+    delete_option('ett_priv_char_name_' . $i);
 }
