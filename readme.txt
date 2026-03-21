@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.7.0.1
+Stable tag: 1.8.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,6 +64,24 @@ No. The importer uses custom streaming line-by-line parsers that handle the SDE 
 marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
 
 == Changelog ==
+
+= 1.8.0 =
+* Added: **Private Trade Hubs** — a new card below the Trade Hubs card allows one or more private market structures (alliance citadels, Upwell structures) to be configured as additional trade hubs. Each private hub has its own system name with autocomplete powered by `ett_mapSolarSystems`, an independent character authentication (either the primary SSO character or a dedicated private character), and a selectable list of accessible structures fetched live from ESI. Multiple private hubs are supported; each can be added or removed independently.
+* Added: Private hub prices are written to `ett_prices` using the system name as the hub key (e.g. `c-n4od`), which ETT Reprocess Trading reads automatically via `DISTINCT hub_key` — no additional configuration required.
+* Added: Private hub market history is fetched for the region the configured system belongs to, deduplicated against other hubs that share the same region.
+* Added: Deselecting all standard trade hubs is now respected — a price or history run will skip standard hubs entirely and process only private hubs if any are configured. Previously, deselecting all hubs caused the run to silently fall back to all five standard hubs.
+* Added: **Changelog tab** on the EVE Trade Tools admin page — automatically detects all active `ett-*` plugins, reads their `readme.txt`, and renders each plugin's changelog section with a link to its GitHub repository. New ETT plugins appear here automatically.
+* Added: `mapSolarSystems.yaml` as an optional step 6 in the SDE import. When present in the ZIP, it populates `ett_mapSolarSystems` (`solar_system_id`, `name`, `region_id`), which powers private hub system name autocomplete and canonical name display throughout the plugin. Missing from the ZIP is handled gracefully — the other five files still import normally.
+* Added: Job progress hub labels for private hubs now use the canonical in-game system name queried from `ett_mapSolarSystems` rather than an uppercased version of the sanitized key. The `private_hub_N` internal key is also resolved to the display name via a dynamic map passed to JS.
+* Added: History progress `last_msg` now shows in orange when rate limiting or ESI errors are active, consistent with the prices progress display.
+* Added: `Heartbeat: OK` label now includes a colon, consistent with `ESI: OK`.
+* Fixed: SDE import AJAX step handler had a hardcoded `$step > 5` guard that rejected step 6, and the final-step summary logic was hardcoded to `$step === 5`. Both now derive the boundary from `count(ETT_SDE::STEPS)`.
+* Fixed: The JavaScript `SDE_STEPS` array was missing the `mapSolarSystems.yaml` entry, so step 6 was never called even after the PHP changes added it.
+* Fixed: ZIP file uploads were rejected with "not allowed to upload this file type" on some server configurations where `finfo`/`mime_content_type` returns `application/octet-stream` or `application/x-zip-compressed` instead of `application/zip`. A `wp_check_filetype_and_ext` filter now force-allows `.zip` files regardless of server MIME detection.
+* Fixed: SDE card stated the full SDE ZIP was ~1 GB; corrected to ~40 MB compressed. The misleading "nested paths such as `sde/fsd/` are handled" text was also removed — the SDE does not use nested paths.
+* Fixed: Private hub `region_id` was not included as a hidden field in the PHP-rendered hub card, causing every save after a page reload to overwrite it with 0. The job-run guard `$region_id <= 0` then silently excluded the private hub from the price run entirely.
+* Fixed: Structure `enabled` state was always lost on save when the hub card was rendered by PHP (as opposed to JS-built new hubs). The PHP checkbox format (`structures[STRUCT_ID] = 1`) and the JS object-array format are now both handled by `ajax_priv_save_hub`.
+* Fixed: `ajax_save_hubs` overwrote an empty hub selection with all five standard hubs before saving. Deselecting all hubs now persists correctly.
 
 = 1.7.0.1 =
 * Fixed: PHPCS — `$step` and `$entry` in exception messages in `class-ett-sde.php` were not passed through an escaping function; both now use `esc_html()`.
