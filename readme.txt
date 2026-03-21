@@ -66,7 +66,7 @@ marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprin
 == Changelog ==
 
 = 1.8.0.1 =
-* Fixed: Changelog tab stopped rendering after the first occurrence of `== ` anywhere in the content — including mid-line substrings such as `=== 5` in code examples. The section-boundary regex now requires `==` to be at the start of a line, so inline `==` in changelog text no longer truncates the output.
+* Fixed: Changelog stopped rendering after the first occurrence of `== ` anywhere in the content — including mid-line substrings such as `=== 5` in code examples. The section-boundary regex now requires `==` to be at the start of a line, so inline `==` in changelog text no longer truncates the output.
 
 = 1.8.0 =
 * Added: **Private Trade Hubs** — a new card below the Trade Hubs card allows one or more private market structures (alliance citadels, Upwell structures) to be configured as additional trade hubs. Each private hub has its own system name with autocomplete powered by `ett_mapSolarSystems`, an independent character authentication (either the primary SSO character or a dedicated private character), and a selectable list of accessible structures fetched live from ESI. Multiple private hubs are supported; each can be added or removed independently.
