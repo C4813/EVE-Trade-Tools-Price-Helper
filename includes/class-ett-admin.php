@@ -26,6 +26,30 @@ class ETT_Admin {
 
 	const OPT_LAST_IMPORT = 'ett_sde_last_import_meta';
 
+	// Private hub storage: serialised array indexed by hub_index (1-based)
+	const OPT_PRIVATE_HUBS = 'ett_private_hubs';
+
+	/**
+	 * Per-private-hub SSO tokens are stored under keys:
+	 *   ett_priv_access_{idx}, ett_priv_access_{idx}_iv, ett_priv_access_{idx}_mac
+	 *   ett_priv_refresh_{idx}, etc.
+	 *   ett_priv_expires_{idx}
+	 *   ett_priv_char_id_{idx}
+	 *   ett_priv_char_name_{idx}
+	 */
+
+	/**
+	 * GitHub repo URLs for known ETT plugins, keyed by plugin slug (directory name).
+	 * Used by the Changelog tab. New plugins need not be listed here if they
+	 * include a 'GitHub URI' header in their main plugin file.
+	 */
+	const PLUGIN_GITHUB_URLS = [
+		'ett-price-helper'      => 'https://github.com/C4813/EVE-Trade-Tools-Price-Helper',
+		'ett-reprocess-trading' => 'https://github.com/C4813/EVE-Trade-Tools-Reprocess-Trading',
+		'ett-eve-login'         => 'https://github.com/C4813/EVE-Trade-Tools-EVE-Login',
+		'eve-login'             => 'https://github.com/C4813/EVE-Trade-Tools-EVE-Login',
+	];
+
 	/** @var array<array{slug:string,label:string,callback:callable}> */
 	private static array $tabs = [];
 
@@ -147,6 +171,15 @@ class ETT_Admin {
 		add_action('admin_post_ett_save_perf', [__CLASS__, 'handle_save_perf']);
 		add_action('wp_ajax_ett_save_perf_ajax', [__CLASS__, 'ajax_save_perf']);
 		add_action('wp_ajax_ett_db_status_ajax', [__CLASS__, 'ajax_db_status']);
+
+		// Private hub actions
+		add_action('admin_post_ett_priv_sso_start',      [__CLASS__, 'handle_priv_sso_start']);
+		add_action('admin_post_ett_priv_sso_disconnect', [__CLASS__, 'handle_priv_sso_disconnect']);
+		add_action('wp_ajax_ett_priv_save_hub',          [__CLASS__, 'ajax_priv_save_hub']);
+		add_action('wp_ajax_ett_priv_add_hub',           [__CLASS__, 'ajax_priv_add_hub']);
+		add_action('wp_ajax_ett_priv_remove_hub',        [__CLASS__, 'ajax_priv_remove_hub']);
+		add_action('wp_ajax_ett_priv_fetch_structures',  [__CLASS__, 'ajax_priv_fetch_structures']);
+		add_action('wp_ajax_ett_system_search',          [__CLASS__, 'ajax_system_search']);
 	}
 
     private static function clamp_int($v, int $min, int $max, int $fallback) : int {
@@ -187,7 +220,7 @@ class ETT_Admin {
             : [];
 		$valid_hubs = array_keys(self::hubs());
 		$hubs       = array_values(array_intersect($hubs, $valid_hubs));
-		if (empty($hubs)) $hubs = $valid_hubs;
+		// Allow empty selection — user may be running with private hubs only.
 
 		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- sanitized per element via absint() below
         $secondary_in = isset($_POST['secondary_structure']) ? (array) wp_unslash($_POST['secondary_structure']) : [];
@@ -289,6 +322,650 @@ class ETT_Admin {
     	]);
     }
 
+	// ── Changelog tab ─────────────────────────────────────────────────────
+
+	/**
+	 * Renders the Changelog tab content.
+	 * Auto-detects all active WordPress plugins that start with 'ett-' or 'eve-'
+	 * and have a readme.txt, then renders each plugin's changelog section.
+	 */
+	public static function render_changelog_tab(): void {
+		if (!function_exists('get_plugins')) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+		}
+
+		$all_plugins    = get_plugins();
+		$active_plugins = (array) get_option('active_plugins', []);
+
+		// Collect active ETT plugins: directories starting with 'ett-', or literally 'eve-login'
+		$ett_plugins = [];
+		foreach ($active_plugins as $plugin_file) {
+			$slug = explode('/', $plugin_file)[0];
+			if (!preg_match('/^(ett-|eve-login$)/i', $slug)) continue;
+			if (!isset($all_plugins[$plugin_file])) continue;
+			$ett_plugins[$slug] = [
+				'file' => $plugin_file,
+				'data' => $all_plugins[$plugin_file],
+			];
+		}
+
+		// Price Helper should always be first even if slug sort differs
+		uksort($ett_plugins, function ($a, $b) {
+			if ($a === 'ett-price-helper') return -1;
+			if ($b === 'ett-price-helper') return 1;
+			return strcmp($a, $b);
+		});
+
+		echo '<div style="max-width:900px;">';
+
+		if (empty($ett_plugins)) {
+			echo '<p>No EVE Trade Tools plugins detected.</p>';
+			echo '</div>';
+			return;
+		}
+
+		foreach ($ett_plugins as $slug => $info) {
+			$plugin_data = $info['data'];
+			$plugin_name = esc_html($plugin_data['Name'] ?? $slug);
+
+			// Resolve readme.txt path
+			$plugin_dir  = WP_PLUGIN_DIR . '/' . $slug;
+			$readme_path = $plugin_dir . '/readme.txt';
+
+			// GitHub URL: check plugin header first, then our built-in map
+			$github_url = '';
+			if (!empty($plugin_data['GitHub Plugin URI'])) {
+				$github_url = esc_url($plugin_data['GitHub Plugin URI']);
+			} elseif (isset(self::PLUGIN_GITHUB_URLS[$slug])) {
+				$github_url = esc_url(self::PLUGIN_GITHUB_URLS[$slug]);
+			}
+
+			echo '<div class="ett-card" style="margin-bottom:16px;">';
+			echo '<h2 style="margin-top:0;display:flex;align-items:center;gap:10px;">';
+			echo $plugin_name;
+			if ($github_url) {
+				echo ' <a href="' . $github_url . '" target="_blank" rel="noopener noreferrer"'
+					. ' style="font-size:0.75em;font-weight:600;padding:2px 10px;background:#24292e;color:#fff;border-radius:3px;text-decoration:none;">'
+					. 'GitHub</a>';
+			}
+			echo '</h2>';
+
+			if (!file_exists($readme_path)) {
+				echo '<p class="description">No readme.txt found for this plugin.</p>';
+				echo '</div>';
+				continue;
+			}
+
+			$changelog_html = self::parse_readme_changelog($readme_path);
+			if ($changelog_html === '') {
+				echo '<p class="description">No changelog section found in readme.txt.</p>';
+			} else {
+				echo '<div style="max-height:400px;overflow-y:auto;font-size:0.9em;">';
+				echo $changelog_html; // Already escaped inside parse_readme_changelog
+				echo '</div>';
+			}
+
+			echo '</div>';
+		}
+
+		echo '</div>';
+	}
+
+	/**
+	 * Parse a readme.txt file and return the == Changelog == section as HTML.
+	 */
+	private static function parse_readme_changelog(string $path): string {
+		$text = (string) file_get_contents($path); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		if (!preg_match('/== Changelog ==\r?\n(.*?)(?:== |\z)/s', $text, $m)) {
+			return '';
+		}
+		$lines  = preg_split('/\r?\n/', trim($m[1]));
+		$html   = '';
+		$in_ul  = false;
+		foreach ($lines as $line) {
+			$line = trim($line);
+			if ($line === '') {
+				if ($in_ul) { $html .= '</ul>'; $in_ul = false; }
+				continue;
+			}
+			if (preg_match('/^= (.+) =\s*$/', $line, $vm)) {
+				if ($in_ul) { $html .= '</ul>'; $in_ul = false; }
+				$html .= '<p style="margin:10px 0 4px;font-weight:700;">' . esc_html($vm[1]) . '</p>';
+			} elseif (str_starts_with($line, '* ')) {
+				if (!$in_ul) { $html .= '<ul style="margin:0 0 4px 18px;list-style:disc;">'; $in_ul = true; }
+				$html .= '<li>' . esc_html(substr($line, 2)) . '</li>';
+			} else {
+				if ($in_ul) { $html .= '</ul>'; $in_ul = false; }
+				$html .= '<p style="margin:4px 0;">' . esc_html($line) . '</p>';
+			}
+		}
+		if ($in_ul) $html .= '</ul>';
+		return $html;
+	}
+
+	// ── Private hub helpers ───────────────────────────────────────────────
+
+	/** Return all saved private hubs as an array indexed by hub_index. */
+	public static function get_private_hubs(): array {
+		$hubs = get_option(self::OPT_PRIVATE_HUBS, []);
+		if (!is_array($hubs)) return [];
+		return $hubs;
+	}
+
+	/** Return the next available hub_index (gaps filled first, then max+1). */
+	private static function next_private_hub_index(): int {
+		$hubs = self::get_private_hubs();
+		$used = array_column($hubs, 'hub_index');
+		for ($i = 1; $i <= 20; $i++) {
+			if (!in_array($i, $used, true)) return $i;
+		}
+		return count($used) + 1;
+	}
+
+	/**
+	 * Get (and auto-refresh) the access token for a private hub character.
+	 * Returns ['ok'=>true,'access'=>string] or ['ok'=>false,'err'=>string].
+	 */
+	public static function get_private_hub_access_token(int $idx): array {
+		$access = ETT_Crypto::decrypt_triplet(
+			(string) get_option('ett_priv_access_' . $idx, ''),
+			(string) get_option('ett_priv_access_' . $idx . '_iv', ''),
+			(string) get_option('ett_priv_access_' . $idx . '_mac', '')
+		);
+		$refresh = ETT_Crypto::decrypt_triplet(
+			(string) get_option('ett_priv_refresh_' . $idx, ''),
+			(string) get_option('ett_priv_refresh_' . $idx . '_iv', ''),
+			(string) get_option('ett_priv_refresh_' . $idx . '_mac', '')
+		);
+		$expires_at = (int) get_option('ett_priv_expires_' . $idx, 0);
+
+		if (!empty($access) && $expires_at > (time() + 30)) {
+			return ['ok' => true, 'access' => $access];
+		}
+		if (empty($refresh)) {
+			return ['ok' => false, 'err' => 'Private hub ' . $idx . ' not authenticated'];
+		}
+
+		$r = self::sso_token_request([
+			'grant_type'    => 'refresh_token',
+			'refresh_token' => $refresh,
+		]);
+		if (!$r['ok']) return $r;
+
+		$tok  = $r['data'];
+		$encA = ETT_Crypto::encrypt_triplet((string) $tok['access_token']);
+		update_option('ett_priv_access_' . $idx, $encA['ciphertext'], false);
+		update_option('ett_priv_access_' . $idx . '_iv', $encA['iv'], false);
+		update_option('ett_priv_access_' . $idx . '_mac', $encA['mac'], false);
+
+		if (!empty($tok['refresh_token'])) {
+			$encR = ETT_Crypto::encrypt_triplet((string) $tok['refresh_token']);
+			update_option('ett_priv_refresh_' . $idx, $encR['ciphertext'], false);
+			update_option('ett_priv_refresh_' . $idx . '_iv', $encR['iv'], false);
+			update_option('ett_priv_refresh_' . $idx . '_mac', $encR['mac'], false);
+		}
+
+		$exp = isset($tok['expires_in']) ? (int) $tok['expires_in'] : 1200;
+		update_option('ett_priv_expires_' . $idx, time() + max(60, $exp) - 30);
+
+		return ['ok' => true, 'access' => (string) $tok['access_token']];
+	}
+
+	/** Start OAuth flow for a private hub character. */
+	public static function handle_priv_sso_start(): void {
+		if (!current_user_can(self::CAP)) wp_die('Insufficient permissions.');
+		$idx = max(1, (int) ($_POST['hub_index'] ?? 0));
+		check_admin_referer('ett_priv_sso_start_' . $idx);
+
+		$client_id = get_option(self::OPT_SSO_CLIENT_ID, '');
+		$client_secret = ETT_Crypto::decrypt_triplet(
+			(string) get_option(self::OPT_SSO_CLIENT_SECRET, ''),
+			(string) get_option(self::OPT_SSO_CLIENT_SECRET . '_iv', ''),
+			(string) get_option(self::OPT_SSO_CLIENT_SECRET . '_mac', '')
+		);
+
+		if (empty($client_id) || empty($client_secret)) {
+			wp_safe_redirect(add_query_arg(['page' => self::SLUG, 'sso_err' => 'missing_app'], admin_url('admin.php')));
+			exit;
+		}
+
+		$state = wp_generate_password(24, false, false);
+		set_transient('ett_priv_state_' . $idx . '_' . $state, $idx, 10 * MINUTE_IN_SECONDS);
+
+		$url = add_query_arg([
+			'response_type' => 'code',
+			'redirect_uri'  => self::unified_callback_url(),
+			'client_id'     => $client_id,
+			'scope'         => self::sso_scopes(),
+			'state'         => $state,
+		], 'https://login.eveonline.com/v2/oauth/authorize/');
+
+		wp_safe_redirect($url);
+		exit;
+	}
+
+	/** OAuth callback for a private hub character. */
+	public static function handle_priv_sso_callback(int $idx): void {
+		if (!current_user_can(self::CAP)) wp_die('Insufficient permissions.');
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- OAuth callback
+		$code  = isset($_GET['code'])  ? sanitize_text_field(wp_unslash($_GET['code']))  : '';
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- OAuth callback
+		$state = isset($_GET['state']) ? sanitize_text_field(wp_unslash($_GET['state'])) : '';
+
+		if (empty($code) || empty($state) || !get_transient('ett_priv_state_' . $idx . '_' . $state)) {
+			wp_safe_redirect(add_query_arg(['page' => self::SLUG, 'sso_err' => 'bad_state'], admin_url('admin.php')));
+			exit;
+		}
+		delete_transient('ett_priv_state_' . $idx . '_' . $state);
+
+		$r = self::sso_token_request(['grant_type' => 'authorization_code', 'code' => $code]);
+		if (!$r['ok']) {
+			wp_safe_redirect(add_query_arg(['page' => self::SLUG, 'sso_err' => 'token'], admin_url('admin.php')));
+			exit;
+		}
+
+		$tok  = $r['data'];
+		$encA = ETT_Crypto::encrypt_triplet((string) $tok['access_token']);
+		update_option('ett_priv_access_' . $idx, $encA['ciphertext'], false);
+		update_option('ett_priv_access_' . $idx . '_iv', $encA['iv'], false);
+		update_option('ett_priv_access_' . $idx . '_mac', $encA['mac'], false);
+
+		$encR = ETT_Crypto::encrypt_triplet((string) $tok['refresh_token']);
+		update_option('ett_priv_refresh_' . $idx, $encR['ciphertext'], false);
+		update_option('ett_priv_refresh_' . $idx . '_iv', $encR['iv'], false);
+		update_option('ett_priv_refresh_' . $idx . '_mac', $encR['mac'], false);
+
+		$exp = isset($tok['expires_in']) ? (int) $tok['expires_in'] : 1200;
+		update_option('ett_priv_expires_' . $idx, time() + max(60, $exp) - 30);
+
+		$claims = self::jwt_claims((string) $tok['access_token']);
+		if (!empty($claims['name'])) {
+			update_option('ett_priv_char_name_' . $idx, (string) $claims['name']);
+		}
+		if (!empty($claims['sub']) && preg_match('/^CHARACTER:EVE:(\d+)$/', (string) $claims['sub'], $m)) {
+			update_option('ett_priv_char_id_' . $idx, (int) $m[1]);
+		}
+
+		// Ensure the hub entry has char_source=private and char_id set
+		$hubs = self::get_private_hubs();
+		foreach ($hubs as &$hub) {
+			if ((int) ($hub['hub_index'] ?? 0) === $idx) {
+				$hub['char_source'] = 'private';
+				$hub['char_id']     = (int) get_option('ett_priv_char_id_' . $idx, 0);
+				$hub['char_name']   = (string) get_option('ett_priv_char_name_' . $idx, '');
+				break;
+			}
+		}
+		unset($hub);
+		update_option(self::OPT_PRIVATE_HUBS, $hubs, false);
+
+		wp_safe_redirect(add_query_arg(['page' => self::SLUG, 'sso_ok' => 1], admin_url('admin.php')));
+		exit;
+	}
+
+	/** Disconnect a private hub character. */
+	public static function handle_priv_sso_disconnect(): void {
+		if (!current_user_can(self::CAP)) wp_die('Insufficient permissions.');
+		$idx = max(1, (int) ($_POST['hub_index'] ?? 0));
+		check_admin_referer('ett_priv_disconnect_' . $idx);
+
+		foreach (['access', 'refresh'] as $part) {
+			delete_option('ett_priv_' . $part . '_' . $idx);
+			delete_option('ett_priv_' . $part . '_' . $idx . '_iv');
+			delete_option('ett_priv_' . $part . '_' . $idx . '_mac');
+		}
+		delete_option('ett_priv_expires_' . $idx);
+		delete_option('ett_priv_char_id_' . $idx);
+		delete_option('ett_priv_char_name_' . $idx);
+
+		$hubs = self::get_private_hubs();
+		foreach ($hubs as &$hub) {
+			if ((int) ($hub['hub_index'] ?? 0) === $idx) {
+				$hub['char_source'] = 'primary';
+				$hub['char_id']     = 0;
+				$hub['char_name']   = '';
+				break;
+			}
+		}
+		unset($hub);
+		update_option(self::OPT_PRIVATE_HUBS, $hubs, false);
+
+		wp_safe_redirect(add_query_arg(['page' => self::SLUG], admin_url('admin.php')));
+		exit;
+	}
+
+	/** AJAX: create a new private hub slot and return its index. */
+	public static function ajax_priv_add_hub(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
+
+		$hubs = self::get_private_hubs();
+		$idx  = self::next_private_hub_index();
+		$hubs[] = [
+			'hub_index'   => $idx,
+			'system_name' => '',
+			'system_id'   => 0,
+			'region_id'   => 0,
+			'char_source' => 'primary',
+			'char_id'     => 0,
+			'char_name'   => '',
+			'structures'  => [],
+		];
+		update_option(self::OPT_PRIVATE_HUBS, $hubs, false);
+
+		wp_send_json_success([
+			'hub_index'       => $idx,
+			'sso_authed'      => (bool) !empty(ETT_Crypto::decrypt_triplet(
+				(string) get_option(self::OPT_SSO_ACCESS_TOKEN, ''),
+				(string) get_option(self::OPT_SSO_ACCESS_TOKEN . '_iv', ''),
+				(string) get_option(self::OPT_SSO_ACCESS_TOKEN . '_mac', '')
+			)),
+			'primary_char_name' => (string) get_option(self::OPT_SSO_CHARACTER_NAME, ''),
+			'priv_start_url'  => esc_url(admin_url('admin-post.php')),
+			'nonce'           => wp_create_nonce('ett_priv_sso_start_' . $idx),
+		]);
+	}
+
+	/** AJAX: remove a private hub slot. */
+	public static function ajax_priv_remove_hub(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
+
+		$idx  = max(1, (int) ($_POST['hub_index'] ?? 0));
+		$hubs = self::get_private_hubs();
+		$hubs = array_values(array_filter($hubs, fn($h) => (int)($h['hub_index'] ?? 0) !== $idx));
+		update_option(self::OPT_PRIVATE_HUBS, $hubs, false);
+
+		// Clean up token options
+		foreach (['access', 'refresh'] as $part) {
+			delete_option('ett_priv_' . $part . '_' . $idx);
+			delete_option('ett_priv_' . $part . '_' . $idx . '_iv');
+			delete_option('ett_priv_' . $part . '_' . $idx . '_mac');
+		}
+		delete_option('ett_priv_expires_' . $idx);
+		delete_option('ett_priv_char_id_' . $idx);
+		delete_option('ett_priv_char_name_' . $idx);
+
+		wp_send_json_success(['removed' => $idx]);
+	}
+
+	/** AJAX: save a private hub's settings (system, char_source, structures). */
+	public static function ajax_priv_save_hub(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
+
+		$idx         = max(1, (int) ($_POST['hub_index'] ?? 0));
+		$system_name = sanitize_text_field(wp_unslash($_POST['system_name'] ?? ''));
+		$system_id   = (int) ($_POST['system_id'] ?? 0);
+		$region_id   = (int) ($_POST['region_id'] ?? 0);
+		// If region_id or system_id are not posted (page reload before system was changed),
+		// preserve the existing saved values rather than overwriting with 0.
+		if ($region_id <= 0 || $system_id <= 0) {
+			foreach (self::get_private_hubs() as $existing_hub) {
+				if ((int) ($existing_hub['hub_index'] ?? 0) === $idx) {
+					if ($region_id <= 0) $region_id = (int) ($existing_hub['region_id'] ?? 0);
+					if ($system_id <= 0) $system_id  = (int) ($existing_hub['system_id']  ?? 0);
+					break;
+				}
+			}
+		}
+		$char_source = in_array(wp_unslash($_POST['char_source'] ?? ''), ['primary', 'private'], true)
+			? sanitize_key(wp_unslash($_POST['char_source']))
+			: 'primary';
+
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		$structures_in = isset($_POST['structures']) ? (array) wp_unslash($_POST['structures']) : [];
+		$structures = [];
+		foreach ($structures_in as $key => $st) {
+			if (is_array($st)) {
+				// JS-built format: structures sent as array of objects {id, name, enabled}
+				$structures[] = [
+					'id'      => (int) ($st['id'] ?? 0),
+					'name'    => sanitize_text_field((string) ($st['name'] ?? '')),
+					'enabled' => !empty($st['enabled']),
+				];
+			} else {
+				// PHP checkbox format: structures[STRUCT_ID] = '1' (checked) or absent (unchecked).
+				// $key is the structure_id, $st is the checkbox value ('1').
+				$struct_id = (int) $key;
+				if ($struct_id <= 0) continue;
+				// Look up the name from the existing saved hub config so we don't lose it.
+				$existing_name = '';
+				foreach (self::get_private_hubs() as $existing_hub) {
+					if ((int) ($existing_hub['hub_index'] ?? 0) !== $idx) continue;
+					foreach ((array) ($existing_hub['structures'] ?? []) as $existing_st) {
+						if ((int) ($existing_st['id'] ?? 0) === $struct_id) {
+							$existing_name = (string) ($existing_st['name'] ?? '');
+							break 2;
+						}
+					}
+				}
+				$structures[] = [
+					'id'      => $struct_id,
+					'name'    => $existing_name,
+					'enabled' => true, // present in POST means checked
+				];
+			}
+		}
+
+		// Any structure that was saved previously but is absent from POST (unchecked checkbox)
+		// needs to be preserved as enabled=false so it stays in the list.
+		foreach (self::get_private_hubs() as $existing_hub) {
+			if ((int) ($existing_hub['hub_index'] ?? 0) !== $idx) continue;
+			foreach ((array) ($existing_hub['structures'] ?? []) as $existing_st) {
+				$existing_id = (int) ($existing_st['id'] ?? 0);
+				if ($existing_id <= 0) continue;
+				$already_present = false;
+				foreach ($structures as $s) {
+					if ((int) $s['id'] === $existing_id) { $already_present = true; break; }
+				}
+				if (!$already_present) {
+					$structures[] = [
+						'id'      => $existing_id,
+						'name'    => (string) ($existing_st['name'] ?? ''),
+						'enabled' => false,
+					];
+				}
+			}
+			break;
+		}
+
+		$hubs = self::get_private_hubs();
+		$found = false;
+		foreach ($hubs as &$hub) {
+			if ((int) ($hub['hub_index'] ?? 0) === $idx) {
+				$hub['system_name'] = $system_name;
+				$hub['system_id']   = $system_id;
+				$hub['region_id']   = $region_id;
+				$hub['char_source'] = $char_source;
+				$hub['structures']  = $structures;
+				$found = true;
+				break;
+			}
+		}
+		unset($hub);
+
+		if (!$found) {
+			$hubs[] = [
+				'hub_index'   => $idx,
+				'system_name' => $system_name,
+				'system_id'   => $system_id,
+				'region_id'   => $region_id,
+				'char_source' => $char_source,
+				'char_id'     => 0,
+				'char_name'   => '',
+				'structures'  => $structures,
+			];
+		}
+
+		update_option(self::OPT_PRIVATE_HUBS, $hubs, false);
+		wp_send_json_success(['saved' => true]);
+	}
+
+	/**
+	 * AJAX: search for a solar system by name fragment (from ett_mapSolarSystems).
+	 * Returns up to 10 matching systems with their IDs and region IDs.
+	 */
+	public static function ajax_system_search(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
+
+		$q = sanitize_text_field(wp_unslash($_POST['q'] ?? ''));
+		if (strlen($q) < 1) {
+			wp_send_json_success(['systems' => []]);
+			return;
+		}
+
+		if (!ETT_ExternalDB::is_configured()) {
+			wp_send_json_error('External database not configured.', 400);
+			return;
+		}
+
+		try {
+			$pdo  = ETT_ExternalDB::pdo();
+			$stmt = $pdo->prepare(
+				'SELECT solar_system_id, name, region_id
+				 FROM ett_mapSolarSystems
+				 WHERE name LIKE :q
+				 ORDER BY name ASC
+				 LIMIT 10'
+			);
+			$stmt->execute([':q' => $q . '%']);
+			$rows = $stmt->fetchAll();
+			// Also search for contains if prefix returns < 5 results
+			if (count($rows) < 5) {
+				$stmt2 = $pdo->prepare(
+					'SELECT solar_system_id, name, region_id
+					 FROM ett_mapSolarSystems
+					 WHERE name LIKE :q AND name NOT LIKE :pq
+					 ORDER BY name ASC
+					 LIMIT 10'
+				);
+				$stmt2->execute([':q' => '%' . $q . '%', ':pq' => $q . '%']);
+				$rows = array_merge($rows, $stmt2->fetchAll());
+				// Deduplicate by solar_system_id
+				$seen = [];
+				$rows = array_filter($rows, function ($r) use (&$seen) {
+					$id = $r['solar_system_id'];
+					if (isset($seen[$id])) return false;
+					$seen[$id] = true;
+					return true;
+				});
+				$rows = array_slice(array_values($rows), 0, 10);
+			}
+		} catch (Exception $e) {
+			wp_send_json_error('DB error: ' . $e->getMessage(), 500);
+			return;
+		}
+
+		wp_send_json_success(['systems' => $rows]);
+	}
+
+	/**
+	 * AJAX: fetch accessible structures in a given solar system for a private hub character.
+	 * Uses ESI character search to find structures by system name prefix, then resolves each.
+	 */
+	public static function ajax_priv_fetch_structures(): void {
+		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
+		check_ajax_referer('ett_admin');
+
+		$idx         = max(1, (int) ($_POST['hub_index'] ?? 0));
+		$system_id   = (int) ($_POST['system_id'] ?? 0);
+		$system_name = sanitize_text_field(wp_unslash($_POST['system_name'] ?? ''));
+		$char_source = sanitize_key(wp_unslash($_POST['char_source'] ?? 'primary'));
+
+		if ($system_id <= 0 || $system_name === '') {
+			wp_send_json_error('Invalid system.', 400);
+			return;
+		}
+
+		// Get token
+		if ($char_source === 'private') {
+			$tok = self::get_private_hub_access_token($idx);
+		} else {
+			$tok = self::get_access_token_for_jobs();
+		}
+
+		if (empty($tok['ok'])) {
+			wp_send_json_error($tok['err'] ?? 'Not authenticated.', 400);
+			return;
+		}
+		$access = $tok['access'];
+
+		// We need the character ID for the search endpoint
+		$char_id = ($char_source === 'private')
+			? (int) get_option('ett_priv_char_id_' . $idx, 0)
+			: (int) get_option(self::OPT_SSO_CHARACTER_ID, 0);
+
+		if (!$char_id) {
+			wp_send_json_error('Character ID not found. Re-authenticate.', 400);
+			return;
+		}
+
+		// Search for structures in this system using the system name as prefix
+		$needle     = $system_name . ' -';
+		$search_url = add_query_arg([
+			'categories' => 'structure',
+			'search'     => $needle,
+			'strict'     => 'false',
+			'datasource' => 'tranquility',
+		], 'https://esi.evetech.net/latest/characters/' . $char_id . '/search/');
+
+		$sresp = wp_remote_get($search_url, [
+			'timeout' => 25,
+			'headers' => [
+				'Authorization' => 'Bearer ' . $access,
+				'Accept'        => 'application/json',
+			],
+		]);
+
+		if (is_wp_error($sresp)) {
+			wp_send_json_error('ESI search failed: ' . $sresp->get_error_message(), 500);
+			return;
+		}
+
+		$sjson = json_decode(wp_remote_retrieve_body($sresp), true);
+		$ids   = (is_array($sjson) && !empty($sjson['structure']) && is_array($sjson['structure']))
+			? array_map('intval', $sjson['structure'])
+			: [];
+
+		if (empty($ids)) {
+			wp_send_json_success(['structures' => []]);
+			return;
+		}
+
+		$ids = array_slice($ids, 0, 100);
+		$out = [];
+
+		foreach ($ids as $sid) {
+			$rurl  = 'https://esi.evetech.net/latest/universe/structures/' . $sid . '/?datasource=tranquility';
+			$rresp = wp_remote_get($rurl, [
+				'timeout' => 20,
+				'headers' => [
+					'Authorization' => 'Bearer ' . $access,
+					'Accept'        => 'application/json',
+				],
+			]);
+
+			if (is_wp_error($rresp)) continue;
+			if ((int) wp_remote_retrieve_response_code($rresp) !== 200) continue;
+
+			$rjson = json_decode(wp_remote_retrieve_body($rresp), true);
+			if (!is_array($rjson)) continue;
+
+			// Only keep structures in the requested system
+			if ((int) ($rjson['solar_system_id'] ?? 0) !== $system_id) continue;
+
+			$out[] = [
+				'id'   => $sid,
+				'name' => (string) ($rjson['name'] ?? 'Structure ' . $sid),
+			];
+		}
+
+		wp_send_json_success(['structures' => $out]);
+	}
+
     public static function ajax_save_schedule() {
         if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
         check_ajax_referer('ett_admin');
@@ -372,6 +1049,9 @@ class ETT_Admin {
 
 		// Allow other plugins to register tabs
 		do_action('ett_admin_tabs');
+
+		// Changelog tab — always last, registered by Price Helper itself
+		self::register_tab('changelog', 'Changelog', [__CLASS__, 'render_changelog_tab']);
 	}
 
 	public static function maybe_disable_cache_for_page(){
@@ -445,6 +1125,51 @@ class ETT_Admin {
 
 		$sched_enabled = get_option(self::OPT_SCHED_ENABLED, '1') !== '0';
 
+		// Build a hub_key → display label map for private hubs so JS can
+		// translate both the internal 'private_hub_N' key (used as current_hub)
+		// and the sanitized system-name key (used as current_region / hub_key in DB).
+		$private_hub_labels = [];
+		$ph_configs = self::get_private_hubs();
+		if (!empty($ph_configs) && ETT_ExternalDB::is_configured()) {
+			// Gather system_ids that need canonical name lookup from the SDE table.
+			$system_id_map = []; // system_id => hub_index
+			foreach ($ph_configs as $ph) {
+				$idx       = (int) ($ph['hub_index'] ?? 0);
+				$system_id = (int) ($ph['system_id']  ?? 0);
+				if ($idx > 0 && $system_id > 0) {
+					$system_id_map[$system_id] = $idx;
+				}
+			}
+			$canonical_names = []; // system_id => canonical_name
+			if (!empty($system_id_map)) {
+				try {
+					$pdo        = ETT_ExternalDB::pdo();
+					$ids_safe   = implode(',', array_map('intval', array_keys($system_id_map)));
+					$name_rows  = $pdo->query("SELECT solar_system_id, name FROM ett_mapSolarSystems WHERE solar_system_id IN ({$ids_safe})")->fetchAll();
+					foreach ($name_rows as $row) {
+						$canonical_names[(int) $row['solar_system_id']] = (string) $row['name'];
+					}
+				} catch (\Throwable $e) {
+					// DB unavailable — fall back to stored system_name below
+				}
+			}
+		}
+
+		foreach (($ph_configs ?? []) as $ph) {
+			$idx         = (int) ($ph['hub_index'] ?? 0);
+			$system_name = (string) ($ph['system_name'] ?? '');
+			$system_id   = (int)  ($ph['system_id']   ?? 0);
+			if ($idx <= 0 || $system_name === '') continue;
+			// Use the canonical SDE name if available, otherwise the user-entered name as-is.
+			$display             = (isset($canonical_names[$system_id]) && $canonical_names[$system_id] !== '')
+				? $canonical_names[$system_id]
+				: $system_name;
+			$internal_key        = 'private_hub_' . $idx;
+			$price_key           = sanitize_key($system_name);
+			$private_hub_labels[$internal_key] = $display;
+			$private_hub_labels[$price_key]    = $display;
+		}
+
 		wp_localize_script('ett-admin', 'ETT_ADMIN', [
 			'ajax_url'                        => admin_url('admin-ajax.php'),
 			'nonce'                           => wp_create_nonce('ett_admin'),
@@ -457,6 +1182,7 @@ class ETT_Admin {
 			'last_price_run_completed_at_iso' => $last_iso,
 			'sched_enabled'                   => $sched_enabled,
 			'home_url'                        => trailingslashit(home_url()),
+			'private_hub_labels'              => $private_hub_labels,
 		]);
 	}
 
@@ -507,6 +1233,19 @@ class ETT_Admin {
 		$cache     = get_option(self::OPT_SSO_STRUCTURES_CACHE, []);
 		if (!is_array($cache)) $cache = [];
 		$cache_at  = (int)get_option(self::OPT_SSO_STRUCTURES_CACHE_AT, 0);
+
+		// Private hubs
+		$private_hubs = get_option(self::OPT_PRIVATE_HUBS, []);
+		if (!is_array($private_hubs)) $private_hubs = [];
+		// Inject char_name from stored options into each hub for template display
+		foreach ($private_hubs as &$ph) {
+			$idx = (int) ($ph['hub_index'] ?? 0);
+			if ($idx > 0 && ($ph['char_source'] ?? '') === 'private') {
+				$ph['char_name'] = (string) get_option('ett_priv_char_name_' . $idx, '');
+				$ph['char_id']   = (int) get_option('ett_priv_char_id_' . $idx, 0);
+			}
+		}
+		unset($ph);
 
 		$import_meta       = get_option(self::OPT_LAST_IMPORT, []);
 		$sched_start_time  = get_option(self::OPT_SCHED_START_TIME, '03:00');
@@ -578,7 +1317,7 @@ class ETT_Admin {
 		// SDE import details
 		$last_import_txt = !empty($import_meta['imported_at']) ? (string)$import_meta['imported_at'] : 'Never';
 		$_sde_parts      = [];
-		foreach (['invMarketGroups','invMetaGroups','invTypes','invMetaTypes','invTypeMaterials','industryActivityProducts'] as $_k){
+		foreach (['invMarketGroups','invMetaGroups','invTypes','invMetaTypes','invTypeMaterials','industryActivityProducts','mapSolarSystems'] as $_k){
 			if (isset($import_meta[$_k])) $_sde_parts[] = $_k . ': ' . number_format((int)$import_meta[$_k]);
 		}
 		$details_txt = !empty($_sde_parts) ? implode(' | ', $_sde_parts) : '';
@@ -633,6 +1372,8 @@ class ETT_Admin {
 				<?php self::render_template('card-hubs.php',
 					compact('selected_hubs', 'secondary_structures', 'tertiary_structures',
 					        'sso_authed', 'cache', 'cache_at')); ?>
+				<?php self::render_template('card-private-hubs.php',
+					array_merge(compact('private_hubs', 'sso_authed'), ['primary_char_name' => $char_name])); ?>
 				<?php self::render_template('card-actions.php',
 					compact('schema_ok', 'lastRun', 'tz',
 					        'batch_max_pages', 'batch_max_seconds', 'history_batch_size')); ?>
@@ -1005,12 +1746,28 @@ class ETT_Admin {
 		};
 		add_filter('upload_dir', $set_upload_dir);
 
+		// Some server configurations return application/octet-stream or x-zip-compressed
+		// for ZIP files, which fails WordPress's server-side MIME verification. Force-allow
+		// ZIP regardless of what the server's finfo/mime_content_type reports.
+		$allow_zip_type = function ($checked, $file, $filename) {
+			if (!$checked['ext']) {
+				$ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+				if ($ext === 'zip') {
+					$checked['ext']  = 'zip';
+					$checked['type'] = 'application/zip';
+				}
+			}
+			return $checked;
+		};
+		add_filter('wp_check_filetype_and_ext', $allow_zip_type, 10, 3);
+
 		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotValidated,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
 		$moved = wp_handle_upload($_FILES['sde_zip'], [
 			'test_form' => false,
-			'mimes'     => ['zip' => 'application/zip|application/octet-stream'],
+			'mimes'     => ['zip' => 'application/zip|application/octet-stream|application/x-zip|application/x-zip-compressed'],
 		]);
 
+		remove_filter('wp_check_filetype_and_ext', $allow_zip_type, 10);
 		remove_filter('upload_dir', $set_upload_dir);
 
 		if (!empty($moved['error']) || empty($moved['file'])) {
@@ -1047,7 +1804,8 @@ class ETT_Admin {
 		$step  = absint(wp_unslash($_POST['step']  ?? 0));
 		$token = sanitize_key(wp_unslash($_POST['token'] ?? ''));
 
-		if ($step < 1 || $step > 5 || $token === '') {
+		$max_step = count(ETT_SDE::STEPS);
+		if ($step < 1 || $step > $max_step || $token === '') {
 			wp_send_json_error('Invalid step or token.', 400);
 		}
 
@@ -1075,14 +1833,16 @@ class ETT_Admin {
 			wp_send_json_error($e->getMessage(), 500);
 		}
 
-		// On final step, persist the import meta and return the summary.
-		if ($step === 5) {
-			// Retrieve whatever was stored by earlier steps via a running meta transient.
-			$meta_key     = 'ett_sde_meta_' . get_current_user_id() . '_' . $token;
-			$running_meta = get_transient($meta_key) ?: [];
+		// Accumulate counts in a short-lived meta transient regardless of step.
+		$meta_key     = 'ett_sde_meta_' . get_current_user_id() . '_' . $token;
+		$running_meta = get_transient($meta_key) ?: [];
+		if (empty($result['skipped'])) {
 			$running_meta[$result['label']] = $result['count'];
+		}
+		set_transient($meta_key, $running_meta, 2 * HOUR_IN_SECONDS);
 
-			// Build the full meta array for OPT_LAST_IMPORT.
+		// On the final step, persist the import meta and return the full summary.
+		if ($step === $max_step) {
 			$final_meta = [
 				'invMarketGroups'          => (int) ($running_meta['invMarketGroups']          ?? 0),
 				'invMetaGroups'            => (int) ($running_meta['invMetaGroups']            ?? 0),
@@ -1092,22 +1852,20 @@ class ETT_Admin {
 				'industryActivityProducts' => (int) ($running_meta['industryActivityProducts'] ?? 0),
 				'imported_at'              => gmdate('Y-m-d H:i:s') . ' UTC',
 			];
+			// Include mapSolarSystems if it was imported
+			if (isset($running_meta['mapSolarSystems'])) {
+				$final_meta['mapSolarSystems'] = (int) $running_meta['mapSolarSystems'];
+			}
 			update_option(self::OPT_LAST_IMPORT, $final_meta, false);
 			delete_transient($meta_key);
 
 			$parts = [];
-			foreach (['invMarketGroups','invMetaGroups','invTypes','invMetaTypes','invTypeMaterials','industryActivityProducts'] as $k) {
+			foreach (['invMarketGroups','invMetaGroups','invTypes','invMetaTypes','invTypeMaterials','industryActivityProducts','mapSolarSystems'] as $k) {
 				if (isset($final_meta[$k])) $parts[] = $k . ': ' . number_format((int) $final_meta[$k]);
 			}
 
 			$result['imported_at'] = $final_meta['imported_at'];
 			$result['details_txt'] = implode(' | ', $parts);
-		} else {
-			// Accumulate counts in a short-lived meta transient.
-			$meta_key     = 'ett_sde_meta_' . get_current_user_id() . '_' . $token;
-			$running_meta = get_transient($meta_key) ?: [];
-			$running_meta[$result['label']] = $result['count'];
-			set_transient($meta_key, $running_meta, 2 * HOUR_IN_SECONDS);
 		}
 
 		wp_send_json_success($result);
@@ -1402,6 +2160,15 @@ class ETT_Admin {
 			}
 			ETT_RT_OAuth::handle_callback();
 			return;
+		}
+
+		// Private hub per-hub flow: transient prefix is ett_priv_state_{idx}_
+		// Scan for a matching transient (hub indices are small integers).
+		for ($i = 1; $i <= 20; $i++) {
+			if (get_transient('ett_priv_state_' . $i . '_' . $state)) {
+				self::handle_priv_sso_callback($i);
+				return;
+			}
 		}
 
 		wp_die('Invalid or expired EVE SSO state.');
