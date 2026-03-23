@@ -382,12 +382,15 @@ class ETT_Jobs {
 			$type_ids = ETT_TypeIDs::all($pdo);
 			set_transient('ett_typeids_' . $job_id, $type_ids, 6 * HOUR_IN_SECONDS);
 
-			// NOTE: we do NOT wipe ett_prices here.
-			// Prices are written via INSERT … ON DUPLICATE KEY UPDATE (keyed on hub_key + type_id),
-			// so each row is overwritten in-place as new data arrives. Rows for types that return
-			// no orders in this run are left untouched with their previous fetched_at timestamp,
-			// which consumers can use to detect stale data. This avoids a window where the table
-			// is empty/incomplete while a run is in progress.
+			// Prices are written to ett_prices_staging during the run and atomically swapped
+			// into ett_prices only on successful completion. This means:
+			//   - The reprocess tool always reads from a complete, consistent snapshot.
+			//   - A failed or cancelled run leaves ett_prices untouched.
+			//   - GREATEST/LEAST aggregation in the upsert correctly merges data across ESI
+			//     pages within a single run (same item can appear on multiple pages), but
+			//     never accumulates drift across scheduled runs.
+			$pdo->exec('CREATE TABLE IF NOT EXISTS ett_prices_staging LIKE ett_prices');
+			$pdo->exec('TRUNCATE TABLE ett_prices_staging');
 
 			$all_hubs_for_run = $selected_hubs;
 			foreach (array_keys($private_hubs_map) as $ph_key) {
@@ -689,7 +692,7 @@ class ETT_Jobs {
         	}
         
         	$sql = "
-        		INSERT INTO ett_prices
+        		INSERT INTO ett_prices_staging
         			(hub_key, region_id, station_id, type_id, sell_min, buy_max, sell_volume, buy_volume, fetched_at)
         		VALUES
         			" . implode(",\n\t\t\t", $values) . "
@@ -936,6 +939,7 @@ class ETT_Jobs {
 		}
 
 		$structure_id = $structure_ids[$struct_index];
+
 		$esi          = ETT_ESI::structure_orders_page($structure_id, $page, $access);
 
 		if (!empty($esi['rate_limited'])) {
@@ -1031,7 +1035,7 @@ class ETT_Jobs {
 				$params[]  = $now;
 			}
 
-			$sql  = "INSERT INTO ett_prices
+			$sql  = "INSERT INTO ett_prices_staging
 				(hub_key, region_id, station_id, type_id, sell_min, buy_max, sell_volume, buy_volume, fetched_at)
 				VALUES " . implode(",\n\t\t\t", $values) . "
 				ON DUPLICATE KEY UPDATE
@@ -1203,6 +1207,21 @@ class ETT_Jobs {
 			? sprintf('All hubs and adjusted prices complete — %d adjusted prices written (took %s)', $written, self::format_duration((int)$elapsed_s))
 			: sprintf('All hubs and adjusted prices complete — %d adjusted prices written', $written);
 
+		// Atomically promote the staging table to live. The reprocess tool always reads
+		// from ett_prices and never sees a partially-populated table. If the rename fails
+		// (e.g. the staging table was never created because the run started on an older
+		// version), log a warning but leave the live table untouched.
+		try {
+			$pdo->exec('
+				RENAME TABLE ett_prices         TO ett_prices_old,
+				             ett_prices_staging TO ett_prices
+			');
+			$pdo->exec('DROP TABLE IF EXISTS ett_prices_old');
+		} catch (\Throwable $e) {
+			if (!is_array($progress['warnings'] ?? null)) $progress['warnings'] = [];
+			$progress['warnings'][] = 'Price table swap failed: ' . $e->getMessage() . ' — live table unchanged.';
+		}
+
 		return $progress;
 	}
 
@@ -1357,6 +1376,13 @@ class ETT_Jobs {
 		$params       = [];
 
 		foreach ($results as $type_id => $result) {
+			$code = (int) ($result['code'] ?? 0);
+			// Skip failed requests entirely — do not write a 0.0 avg that would
+			// overwrite a previously valid avg_daily_volume and silently remove
+			// the item from profit results on subsequent runs.
+			if ($code !== 200 && $code !== 0) {
+				continue;
+			}
 			$data = $result['data'] ?? [];
 			$avg  = 0.0;
 			if (!empty($data)) {
