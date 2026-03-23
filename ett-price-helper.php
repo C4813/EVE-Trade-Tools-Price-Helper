@@ -2,7 +2,7 @@
 /**
  * Plugin Name: EVE Trade Tools Price Helper
  * Description: Admin-only tool to import the EVE Static Data Export (SDE) and pull hub prices from ESI into an external database.
- * Version: 1.8.0.1
+ * Version: 1.8.1
  * Author: C4813
  * License: GPLv2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
