@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.8.0.1
+Stable tag: 1.8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,6 +64,12 @@ No. The importer uses custom streaming line-by-line parsers that handle the SDE 
 marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
 
 == Changelog ==
+
+= 1.8.1 =
+* Fixed: "Potential Daily Profit" in ETT Reprocess Trading degraded on every scheduled run due to two compounding bugs in the price fetch pipeline. First, the `ON DUPLICATE KEY UPDATE` upsert used `GREATEST`/`LEAST` to merge ESI order pages correctly within a single run, but also persisted that aggregation across runs — causing `buy_max` (item cost) to ratchet up and `sell_min` (material revenue) to ratchet down with each execution, permanently compressing margins even when market conditions were stable. Second, failed ESI responses (non-200) still wrote `avg_daily_volume = 0` to `ett_market_history`, overwriting previously valid volume figures and silently removing items from results on subsequent runs.
+* Changed: Price data is now written to a staging table (`ett_prices_staging`) during each run and promoted to the live `ett_prices` table via an atomic `RENAME TABLE` only on successful completion. This means the reprocess tool always reads from a complete, consistent snapshot; a failed or interrupted run leaves the live table untouched. The `GREATEST`/`LEAST` aggregation is preserved — it still correctly merges data across ESI pages within a single run — but can no longer accumulate drift across runs.
+* Fixed: Failed ESI history responses (non-200 HTTP codes) no longer write a zero `avg_daily_volume` to `ett_market_history`. Items that could not be fetched retain their last known volume, preventing them from being incorrectly filtered out by the minimum volume threshold on subsequent runs.
+* Fixed: Changelog stopped rendering after the first occurrence of `== ` anywhere in the content — including mid-line substrings such as `=== 5` in code examples. The section-boundary regex now requires `==` to be at the start of a line, so inline `==` in changelog text no longer truncates the output.
 
 = 1.8.0.1 =
 * Fixed: Changelog stopped rendering after the first occurrence of `== ` anywhere in the content — including mid-line substrings such as `=== 5` in code examples. The section-boundary regex now requires `==` to be at the start of a line, so inline `==` in changelog text no longer truncates the output.
