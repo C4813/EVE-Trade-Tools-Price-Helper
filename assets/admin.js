@@ -2005,15 +2005,8 @@
 		attachActiveJobOnLoad();
 		startIdleAttachWatcher();
 
-		const details = document.getElementById('ett-history-details');
-		if (details){
-			details.addEventListener('toggle', function(){
-				if (details.open) startHistoryAutoRefresh();
-				else stopHistoryAutoRefresh();
-			});
-
-			if (details.open) startHistoryAutoRefresh();
-		}
+		// Always load run history on page open so completed jobs are visible immediately.
+		refreshRunHistory();
 	});
 
 	$(function(){
