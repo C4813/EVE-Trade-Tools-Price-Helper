@@ -575,6 +575,32 @@ class ETT_Jobs {
 		$orders = $esi['orders'] ?? [];
 		$progress['sleep_until'] = 0;
 
+		// ── Extension hooks (additive – no existing behaviour changed) ──────
+		// Fires once at the start of a hub's primary fetch so listeners can
+		// clear stale data before new pages arrive.
+		if ($source === 'primary' && $page === 1) {
+			/**
+			 * @param string $hub_key    ETT hub key, e.g. 'jita'.
+			 * @param int    $region_id  EVE region ID.
+			 * @param int    $station_id Primary station ID.
+			 */
+			do_action('ett_prices_hub_start', $hub_key, $region_id, $station_id);
+		}
+		// Fires for every successful page of raw ESI orders so listeners can
+		// capture individual order rows (e.g. per-type order books).
+		if (!empty($orders)) {
+			/**
+			 * @param string $hub_key    ETT hub key.
+			 * @param int    $region_id  EVE region ID.
+			 * @param int    $station_id Primary station ID.
+			 * @param int    $page       ESI page number (1-based).
+			 * @param string $source     'primary', 'secondary', or 'tertiary'.
+			 * @param array  $orders     Raw ESI order objects for this page.
+			 */
+			do_action('ett_prices_raw_orders_page', $hub_key, $region_id, $station_id, $page, $source, $orders);
+		}
+		// ── End extension hooks ─────────────────────────────────────────────
+
 		if (empty($orders)) {
 			if ($source === 'primary') {
 				if ($secondary_structure_id > 0) {
@@ -1342,6 +1368,19 @@ class ETT_Jobs {
 		// Concurrency = batch_size: all items fire in one parallel group, no sub-group gaps.
 		// The error_remain guard inside curl_multi_history handles ESI rate-limit safety.
 		$results = self::curl_multi_history($region_id, $batch, max(1, min($batch_size, 50)));
+
+		// ── Extension hook (additive – no existing behaviour changed) ──────
+		// Fires with the raw per-day history data before it is aggregated into
+		// avg_daily_volume.  Listeners can capture lowest/highest per day for
+		// trend calculations without needing to make their own ESI calls.
+		/**
+		 * @param string $hub_key    ETT hub key, e.g. 'jita'.
+		 * @param int    $region_id  EVE region ID.
+		 * @param array  $results    Map of type_id → ['code' => int, 'data' => [...daily rows...]]
+		 *                           Each daily row: date, lowest, highest, average, volume, order_count.
+		 */
+		do_action('ett_prices_history_results', $hub_key, $region_id, $results);
+		// ── End extension hook ─────────────────────────────────────────────
 
 		// Track rate limiting and errors
 		if (!isset($progress['rate_limited_seen'])) $progress['rate_limited_seen'] = false;
