@@ -382,9 +382,9 @@ class ETT_Admin {
 
 			echo '<div class="ett-card" style="margin-bottom:16px;">';
 			echo '<h2 style="margin-top:0;display:flex;align-items:center;gap:10px;">';
-			echo $plugin_name;
+			echo esc_html( $plugin_name );
 			if ($github_url) {
-				echo ' <a href="' . $github_url . '" target="_blank" rel="noopener noreferrer"'
+				echo ' <a href="' . esc_url( $github_url ) . '" target="_blank" rel="noopener noreferrer"'
 					. ' style="font-size:0.75em;font-weight:600;padding:2px 10px;background:#24292e;color:#fff;border-radius:3px;text-decoration:none;">'
 					. 'GitHub</a>';
 			}
@@ -401,7 +401,7 @@ class ETT_Admin {
 				echo '<p class="description">No changelog section found in readme.txt.</p>';
 			} else {
 				echo '<div style="max-height:400px;overflow-y:auto;font-size:0.9em;">';
-				echo $changelog_html; // Already escaped inside parse_readme_changelog
+				echo $changelog_html; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pre-escaped in parse_readme_changelog
 				echo '</div>';
 			}
 
@@ -514,7 +514,7 @@ class ETT_Admin {
 	/** Start OAuth flow for a private hub character. */
 	public static function handle_priv_sso_start(): void {
 		if (!current_user_can(self::CAP)) wp_die('Insufficient permissions.');
-		$idx = max(1, (int) ($_POST['hub_index'] ?? 0));
+		$idx = max(1, absint( wp_unslash( $_POST['hub_index'] ?? 0 ) ));
 		check_admin_referer('ett_priv_sso_start_' . $idx);
 
 		$client_id = get_option(self::OPT_SSO_CLIENT_ID, '');
@@ -607,7 +607,7 @@ class ETT_Admin {
 	/** Disconnect a private hub character. */
 	public static function handle_priv_sso_disconnect(): void {
 		if (!current_user_can(self::CAP)) wp_die('Insufficient permissions.');
-		$idx = max(1, (int) ($_POST['hub_index'] ?? 0));
+		$idx = max(1, absint( wp_unslash( $_POST['hub_index'] ?? 0 ) ));
 		check_admin_referer('ett_priv_disconnect_' . $idx);
 
 		foreach (['access', 'refresh'] as $part) {
@@ -672,7 +672,7 @@ class ETT_Admin {
 		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
 		check_ajax_referer('ett_admin');
 
-		$idx  = max(1, (int) ($_POST['hub_index'] ?? 0));
+		$idx  = max(1, absint( wp_unslash( $_POST['hub_index'] ?? 0 ) ));
 		$hubs = self::get_private_hubs();
 		$hubs = array_values(array_filter($hubs, fn($h) => (int)($h['hub_index'] ?? 0) !== $idx));
 		update_option(self::OPT_PRIVATE_HUBS, $hubs, false);
@@ -695,10 +695,10 @@ class ETT_Admin {
 		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
 		check_ajax_referer('ett_admin');
 
-		$idx         = max(1, (int) ($_POST['hub_index'] ?? 0));
+		$idx         = max(1, absint( wp_unslash( $_POST['hub_index'] ?? 0 ) ));
 		$system_name = sanitize_text_field(wp_unslash($_POST['system_name'] ?? ''));
-		$system_id   = (int) ($_POST['system_id'] ?? 0);
-		$region_id   = (int) ($_POST['region_id'] ?? 0);
+		$system_id   = absint( wp_unslash( $_POST['system_id'] ?? 0 ) );
+		$region_id   = absint( wp_unslash( $_POST['region_id'] ?? 0 ) );
 		// If region_id or system_id are not posted (page reload before system was changed),
 		// preserve the existing saved values rather than overwriting with 0.
 		if ($region_id <= 0 || $system_id <= 0) {
@@ -870,8 +870,8 @@ class ETT_Admin {
 		if (!current_user_can(self::CAP)) wp_send_json_error('Insufficient permissions', 403);
 		check_ajax_referer('ett_admin');
 
-		$idx         = max(1, (int) ($_POST['hub_index'] ?? 0));
-		$system_id   = (int) ($_POST['system_id'] ?? 0);
+		$idx         = max(1, absint( wp_unslash( $_POST['hub_index'] ?? 0 ) ));
+		$system_id   = absint( wp_unslash( $_POST['system_id'] ?? 0 ) );
 		$system_name = sanitize_text_field(wp_unslash($_POST['system_name'] ?? ''));
 		$char_source = sanitize_key(wp_unslash($_POST['char_source'] ?? 'primary'));
 
