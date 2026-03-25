@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.8.1
+Stable tag: 1.8.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,6 +64,12 @@ No. The importer uses custom streaming line-by-line parsers that handle the SDE 
 marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
 
 == Changelog ==
+
+= 1.8.2 =
+* Added: Extension hooks `ett_prices_hub_start` and `ett_prices_raw_orders_page` fired during price runs, and `ett_prices_history_results` fired during history runs. These allow companion plugins to capture raw order-book and daily history data without making independent ESI calls.
+* Fixed: Output escaping applied to plugin name and GitHub URL in the changelog card. `wp_unslash()` and `absint()` now used consistently for all `$_POST` inputs in private hub AJAX handlers.
+* Fixed: Run history card now populates immediately on page load rather than only after a job completes or the history toggle is opened.
+* Fixed: Stable tag in readme.txt now matches plugin version header.
 
 = 1.8.1 =
 * Fixed: "Potential Daily Profit" in ETT Reprocess Trading degraded on every scheduled run due to two compounding bugs in the price fetch pipeline. First, the `ON DUPLICATE KEY UPDATE` upsert used `GREATEST`/`LEAST` to merge ESI order pages correctly within a single run, but also persisted that aggregation across runs — causing `buy_max` (item cost) to ratchet up and `sell_min` (material revenue) to ratchet down with each execution, permanently compressing margins even when market conditions were stable. Second, failed ESI responses (non-200) still wrote `avg_daily_volume = 0` to `ett_market_history`, overwriting previously valid volume figures and silently removing items from results on subsequent runs.
