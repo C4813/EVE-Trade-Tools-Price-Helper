@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.8.2
+Stable tag: 1.8.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,6 +64,9 @@ No. The importer uses custom streaming line-by-line parsers that handle the SDE 
 marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
 
 == Changelog ==
+
+= 1.8.3 =
+* Fixed: The atomic `RENAME TABLE` swap introduced in 1.8.1 could fail silently on every scheduled run if a leftover `ett_prices_old` table existed from a previous interrupted swap. MySQL's `RENAME TABLE` is atomic — if any target name already exists, the entire statement fails. A crash, timeout, or PHP termination between the RENAME and the subsequent DROP would leave `ett_prices_old` behind permanently, causing every future swap to fail. The staging table received fresh data each run but was never promoted, so `ett_prices` remained frozen while `ett_adjusted_prices` continued to update, gradually eroding calculated profit margins. A `DROP TABLE IF EXISTS ett_prices_old` is now executed before the RENAME to clear any leftover from a prior incomplete swap.
 
 = 1.8.2 =
 * Added: Extension hooks `ett_prices_hub_start` and `ett_prices_raw_orders_page` fired during price runs, and `ett_prices_history_results` fired during history runs. These allow companion plugins to capture raw order-book and daily history data without making independent ESI calls.
