@@ -1234,10 +1234,16 @@ class ETT_Jobs {
 			: sprintf('All hubs and adjusted prices complete — %d adjusted prices written', $written);
 
 		// Atomically promote the staging table to live. The reprocess tool always reads
-		// from ett_prices and never sees a partially-populated table. If the rename fails
-		// (e.g. the staging table was never created because the run started on an older
-		// version), log a warning but leave the live table untouched.
+		// from ett_prices and never sees a partially-populated table.
+		//
+		// IMPORTANT: We must DROP ett_prices_old BEFORE the RENAME. MySQL's RENAME TABLE
+		// is atomic — if the target name already exists, the ENTIRE statement fails.
+		// Without this pre-DROP, a leftover ett_prices_old (from a previous crash, timeout,
+		// or error after a successful RENAME but before its DROP) would cause every
+		// subsequent RENAME to fail silently, leaving ett_prices permanently stale while
+		// ett_adjusted_prices continues to update — gradually eroding calculated profits.
 		try {
+			$pdo->exec('DROP TABLE IF EXISTS ett_prices_old');
 			$pdo->exec('
 				RENAME TABLE ett_prices         TO ett_prices_old,
 				             ett_prices_staging TO ett_prices
