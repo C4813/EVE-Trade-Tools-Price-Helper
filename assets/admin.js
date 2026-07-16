@@ -14,6 +14,16 @@
 	let historyStartedAtMs  = null;
 	let historyElapsedTimer = null;
 	let historyCancelling   = false;
+
+	// Contracts job state (mirrors history job state above)
+	let contractsJobId        = null;
+	let contractsRunning      = false;
+	let contractsStepTimer    = null;
+	let contractsStepInFlight = false;
+	let contractsRunGen       = 0;
+	let contractsStartedAtMs  = null;
+	let contractsElapsedTimer = null;
+	let contractsCancelling   = false;
 	let idleAttachTimer = null;
 	let terminalAlertShown = false;
 	let elapsedTimer = null;
@@ -27,6 +37,7 @@
 	let runBtnLabel = null;
 	let runPricesBtnLabel = null;
 	let runHistoryBtnLabel = null;
+	let runContractsBtnLabel = null;
 	let genBtnLabel = null;
     let genBtnFlashTimer = null;
 	let runGen = 0; // increments whenever we stop/cancel/start to invalidate in-flight AJAX responses
@@ -55,8 +66,61 @@
 		historyStartedAtMs  = null;
 	}
 
+	function startContractsElapsedTicker(){
+		if (contractsElapsedTimer) clearInterval(contractsElapsedTimer);
+		const tick = () => {
+			if (!contractsStartedAtMs) return;
+			const secs = Math.floor((Date.now() - contractsStartedAtMs) / 1000);
+			$('#ett-contracts-kpi-elapsed').text(formatHMS(secs));
+		};
+		tick();
+		contractsElapsedTimer = setInterval(tick, 1000);
+	}
+
+	function stopContractsElapsedTicker(){
+		if (contractsElapsedTimer) clearInterval(contractsElapsedTimer);
+		contractsElapsedTimer = null;
+		contractsStartedAtMs  = null;
+	}
+
 	function setHistoryHeartbeat(tsMysql){
 		const el  = $('#ett-history-heartbeat');
+		const dot = el.find('.ett-dot');
+		const txt = el.find('.ett-hb-text');
+
+		if (!tsMysql){
+			dot.removeClass('ok bad warn');
+			txt.text('No heartbeat');
+			return;
+		}
+
+		const hb    = new Date(tsMysql.replace(' ', 'T'));
+		const delta = nowMs() - hb.getTime();
+
+		if (isNaN(delta)){
+			dot.removeClass('ok bad warn');
+			txt.text('Heartbeat unknown');
+			return;
+		}
+
+		if (delta <= 15000){
+			dot.removeClass('bad warn').addClass('ok');
+			txt.text('Heartbeat: OK');
+			return;
+		}
+
+		if (delta <= 90000){
+			dot.removeClass('ok bad').addClass('warn');
+			txt.text('Waiting for heartbeat');
+			return;
+		}
+
+		dot.removeClass('ok warn').addClass('bad');
+		txt.text('Heartbeat stale');
+	}
+
+	function setContractsHeartbeat(tsMysql){
+		const el  = $('#ett-contracts-heartbeat');
 		const dot = el.find('.ett-dot');
 		const txt = el.find('.ett-hb-text');
 
@@ -148,7 +212,47 @@
 		$('#ett-history-progress-json').text(JSON.stringify(jsonOut, null, 2));
 	}
 
-	function stopHistoryJob(){
+	function renderContractsProgress(progress){
+		progress = progress || {};
+		const phase = (progress.phase || '').toLowerCase();
+
+		let phaseText = '—';
+		if (phase === 'queued')       phaseText = 'Queued';
+		else if (phase === 'init')        phaseText = 'Initialising…';
+		else if (phase === 'listing')     phaseText = 'Listing Jita contracts…';
+		else if (phase === 'checking')    phaseText = 'Checking contract contents…';
+		else if (phase === 'aggregating') phaseText = 'Computing prices…';
+		else if (phase === 'pruning')     phaseText = 'Cleaning up stale records…';
+		else if (phase === 'done')        phaseText = 'Completed.';
+		else if (phase === 'error')       phaseText = 'Error.';
+		else if (phase === 'cancelled')   phaseText = 'Cancelled.';
+		else if (phase)                   phaseText = phase;
+
+		$('#ett-contracts-phase').text(phaseText);
+
+		const contMsg = progress.last_msg || '—';
+		const $contMsgEl = $('#ett-contracts-msg');
+		$contMsgEl.text(contMsg);
+
+		$('#ett-contracts-kpi-page').text(
+			(progress.list_page != null && progress.list_total_pages != null)
+				? (Math.min(progress.list_page, progress.list_total_pages) + ' / ' + progress.list_total_pages)
+				: '—'
+		);
+		$('#ett-contracts-kpi-candidates').text(fmtInt(progress.candidates_found));
+		$('#ett-contracts-kpi-checked').text(fmtInt(progress.checked_count));
+		$('#ett-contracts-kpi-matched').text(fmtInt(progress.matched_count));
+
+		const jsonOut = Object.assign({}, progress);
+		if (contractsStartedAtMs){
+			const secs = Math.floor((Date.now() - contractsStartedAtMs) / 1000);
+			jsonOut.elapsed_seconds = secs;
+			jsonOut.elapsed_hms     = formatHMS(secs);
+		}
+		$('#ett-contracts-progress-json').text(JSON.stringify(jsonOut, null, 2));
+	}
+
+	function stopHistoryJob(keepRunBtnDisabled = false){
 		historyRunGen++;
 		historyRunning      = false;
 		historyJobId        = null;
@@ -156,16 +260,22 @@
 		if (historyStepTimer) clearInterval(historyStepTimer);
 		historyStepTimer = null;
 		stopHistoryElapsedTicker();
-		$('#ett-btn-cancel').prop('disabled', true).text('Cancel');
 		$('#ett-history-heartbeat').hide();
 
-		const $runBtn = $('#ett-btn-run');
-		if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
-		$runBtn.prop('disabled', false);
-		btnSetLabel($runBtn, runBtnLabel);
-		if (runPricesBtnLabel !== null) btnSetLabel($('#ett-btn-run-prices'), runPricesBtnLabel);
-		$('#ett-btn-run-prices').prop('disabled', false);
-		$('#ett-btn-run-history').prop('disabled', false);
+		// keepRunBtnDisabled is passed as true when a contracts job is about
+		// to start immediately after this call (the history -> contracts
+		// auto-chain), so contractsRunning hasn't been set to true yet.
+		if (!contractsRunning && !keepRunBtnDisabled) {
+			$('#ett-btn-cancel').prop('disabled', true).text('Cancel');
+			const $runBtn = $('#ett-btn-run');
+			if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
+			$runBtn.prop('disabled', false);
+			btnSetLabel($runBtn, runBtnLabel);
+			if (runPricesBtnLabel !== null) btnSetLabel($('#ett-btn-run-prices'), runPricesBtnLabel);
+			$('#ett-btn-run-prices').prop('disabled', false);
+			$('#ett-btn-run-history').prop('disabled', false);
+			$('#ett-btn-run-contracts').prop('disabled', false);
+		}
 	}
 
 	function startHistoryJob(jobId, startedAt, observeOnlyHistory = false, initialProgress = null){
@@ -195,6 +305,7 @@
 		$('#ett-btn-run').prop('disabled', true);
 		$('#ett-btn-run-prices').prop('disabled', true);
 		$('#ett-btn-run-history').prop('disabled', true);
+		$('#ett-btn-run-contracts').prop('disabled', true);
 
 		const myGen = historyRunGen;
 
@@ -218,7 +329,9 @@
 						if (st.data.heartbeat_at) setHistoryHeartbeat(st.data.heartbeat_at);
 
 						if (['done', 'error', 'cancelled'].includes(st.data.status)){
-							stopHistoryJob();
+							const cJobId = (st.data.status === 'done' && st.data.progress && st.data.progress.contracts_job_id) ? st.data.progress.contracts_job_id : null;
+							stopHistoryJob(!!cJobId);
+							if (cJobId) startContractsJob(cJobId, null, observeOnlyHistory);
 							refreshRunHistory();
 						}
 					}
@@ -252,7 +365,9 @@
 					if (r.data.heartbeat_at) setHistoryHeartbeat(r.data.heartbeat_at);
 
 					if (['done', 'error', 'cancelled'].includes(r.data.status)){
-						stopHistoryJob();
+						const cJobId = (r.data.status === 'done' && r.data.progress && r.data.progress.contracts_job_id) ? r.data.progress.contracts_job_id : null;
+						stopHistoryJob(!!cJobId);
+						if (cJobId) startContractsJob(cJobId, null, false);
 						refreshRunHistory();
 					}
 					return;
@@ -269,6 +384,131 @@
 
 		doHistoryStep();
 		historyStepTimer = setInterval(doHistoryStep, 500);
+	}
+
+	function stopContractsJob(){
+		contractsRunGen++;
+		contractsRunning      = false;
+		contractsJobId        = null;
+		contractsStepInFlight = false;
+		if (contractsStepTimer) clearInterval(contractsStepTimer);
+		contractsStepTimer = null;
+		stopContractsElapsedTicker();
+		$('#ett-btn-cancel').prop('disabled', true).text('Cancel');
+		$('#ett-contracts-heartbeat').hide();
+
+		const $runBtn = $('#ett-btn-run');
+		if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
+		$runBtn.prop('disabled', false);
+		btnSetLabel($runBtn, runBtnLabel);
+		if (runPricesBtnLabel !== null) btnSetLabel($('#ett-btn-run-prices'), runPricesBtnLabel);
+		$('#ett-btn-run-prices').prop('disabled', false);
+		$('#ett-btn-run-history').prop('disabled', false);
+		$('#ett-btn-run-contracts').prop('disabled', false);
+	}
+
+	/**
+	 * Contracts is the last step in the Fetch All chain — nothing auto-chains
+	 * after it, so unlike startHistoryJob() above, there's no "next job"
+	 * check on completion here.
+	 */
+	function startContractsJob(jobId, startedAt, observeOnlyContracts = false, initialProgress = null){
+		if (contractsRunning) return;
+
+		contractsJobId   = jobId;
+		contractsRunning = true;
+
+		if (startedAt) {
+			const d = parseWpMysql(startedAt);
+			contractsStartedAtMs = d ? d.getTime() : Date.now();
+		} else {
+			contractsStartedAtMs = Date.now();
+		}
+
+		contractsRunGen++;
+
+		$('#ett-contracts-progress').show();
+		$('#ett-contracts-heartbeat').show();
+		renderContractsProgress(initialProgress || { phase: 'queued', last_msg: 'Starting contract fetch…' });
+		startContractsElapsedTicker();
+
+		$('#ett-btn-cancel').prop('disabled', false).text('Cancel Contracts');
+		$('#ett-btn-run').prop('disabled', true);
+		$('#ett-btn-run-prices').prop('disabled', true);
+		$('#ett-btn-run-history').prop('disabled', true);
+		$('#ett-btn-run-contracts').prop('disabled', true);
+
+		const myGen = contractsRunGen;
+
+		if (observeOnlyContracts) {
+			// Cron-driven — just poll status, don't call ett_job_step
+			async function doContractsStatusPoll(){
+				if (!contractsRunning || !contractsJobId) return;
+				if (myGen !== contractsRunGen) return;
+
+				try {
+					const st = await ajax('GET', {
+						action: 'ett_job_status',
+						job_id: contractsJobId,
+						_ajax_nonce: ETT_ADMIN.nonce
+					});
+
+					if (myGen !== contractsRunGen) return;
+
+					if (st && st.success){
+						renderContractsProgress(st.data.progress);
+						if (st.data.heartbeat_at) setContractsHeartbeat(st.data.heartbeat_at);
+
+						if (['done', 'error', 'cancelled'].includes(st.data.status)){
+							stopContractsJob();
+						}
+					}
+				} catch (e){
+					// transient — keep polling
+				}
+			}
+
+			doContractsStatusPoll();
+			contractsStepTimer = setInterval(doContractsStatusPoll, 1000);
+			return;
+		}
+
+		async function doContractsStep(){
+			if (!contractsRunning || !contractsJobId) return;
+			if (contractsStepInFlight) return;
+			if (myGen !== contractsRunGen) return;
+
+			contractsStepInFlight = true;
+			try {
+				const r = await ajax('POST', {
+					action: 'ett_job_step',
+					job_id: contractsJobId,
+					_ajax_nonce: ETT_ADMIN.nonce
+				});
+
+				if (myGen !== contractsRunGen) return;
+
+				if (r && r.success){
+					renderContractsProgress(r.data.progress);
+					if (r.data.heartbeat_at) setContractsHeartbeat(r.data.heartbeat_at);
+
+					if (['done', 'error', 'cancelled'].includes(r.data.status)){
+						stopContractsJob();
+					}
+					return;
+				}
+
+				stopContractsJob();
+			} catch (e){
+				if (myGen !== contractsRunGen) return;
+				// transient error — keep going
+			} finally {
+				contractsStepInFlight = false;
+			}
+		}
+
+		doContractsStep();
+		contractsStepTimer = setInterval(doContractsStep, 500);
 	}
 
 	// ─────────────────────────────────────────────────────────────────────
@@ -594,6 +834,14 @@
 		if (colorClass) hDot.addClass(colorClass);
 		hTxt.text(text || 'ESI: Unknown');
 		hTxt.attr('title', note ? String(note) : '');
+
+		// Mirror into contracts fetch panel
+		const cDot = $('#ett-contracts-esi .ett-dot');
+		const cTxt = $('#ett-contracts-esi-text');
+		cDot.removeClass('ok warn bad');
+		if (colorClass) cDot.addClass(colorClass);
+		cTxt.text(text || 'ESI: Unknown');
+		cTxt.attr('title', note ? String(note) : '');
 	}
 
 	async function refreshEsiStatus(){
@@ -951,6 +1199,7 @@
           $('#ett-btn-run-prices').prop('disabled', true);
           $('#ett-btn-run').prop('disabled', true);
           $('#ett-btn-run-history').prop('disabled', true);
+          $('#ett-btn-run-contracts').prop('disabled', true);
         } else if (jobType === 'typeids'){
           const $genBtn = $('#ett-btn-generate');
           if (genBtnLabel === null) genBtnLabel = btnGetLabel($genBtn);
@@ -975,6 +1224,7 @@
           $('#ett-btn-run').prop('disabled', false);
           $('#ett-btn-run-prices').prop('disabled', false);
           $('#ett-btn-run-history').prop('disabled', false);
+          $('#ett-btn-run-contracts').prop('disabled', false);
 
           // Restore button labels on start failure
           if (jobType === 'prices'){
@@ -1028,6 +1278,14 @@
 				return;
 			}
 
+			// If a contracts job is active on page load, attach to it directly
+			if ((job.job_type || prog.job_type) === 'contracts') {
+				$('#ett-contracts-progress').show();
+				const contObserveOnly = (driver === 'system-cron' || driver === 'cron');
+				startContractsJob(job.job_id, job.started_at || null, contObserveOnly, prog);
+				return;
+			}
+
             runGen++;
 			running = true;
 			terminalAlertShown = false;
@@ -1038,10 +1296,12 @@
 			$('#ett-btn-run').prop('disabled', true);
 			$('#ett-btn-run-prices').prop('disabled', true);
 			$('#ett-btn-run-history').prop('disabled', true);
+			$('#ett-btn-run-contracts').prop('disabled', true);
 
-			// A prices (or other) job is already running — hide any stale history progress
-			// panel that may have been left visible from a previous run.
+			// A prices (or other) job is already running — hide any stale history/contracts
+			// progress panels that may have been left visible from a previous run.
 			$('#ett-history-progress').hide();
+			$('#ett-contracts-progress').hide();
 
 			jobId = job.job_id;
 
@@ -1084,6 +1344,7 @@
 
 				if (!r || !r.success || !r.data || !r.data.job) return;
 				if (historyCancelling) return;
+				if (contractsCancelling) return;
 				attachActiveJobOnLoad();
 			} catch (e){
 				// ignore
@@ -1111,10 +1372,11 @@
 
         $('#ett-btn-cancel').prop('disabled', true);
 
-        // Re-enable all run buttons when a job finishes (unless history is still running).
+        // Re-enable all run buttons when a job finishes (unless history or
+        // contracts is still running).
         // keepRunBtnDisabled is passed as true when a history job is about to start
         // immediately after this call, so historyRunning hasn't been set to true yet.
-        if (!historyRunning && !keepRunBtnDisabled) {
+        if (!historyRunning && !contractsRunning && !keepRunBtnDisabled) {
             const $runBtn = $('#ett-btn-run');
             if (runBtnLabel === null) runBtnLabel = btnGetLabel($runBtn);
             $runBtn.prop('disabled', false);
@@ -1122,6 +1384,7 @@
             if (runPricesBtnLabel !== null) btnSetLabel($('#ett-btn-run-prices'), runPricesBtnLabel);
             $('#ett-btn-run-prices').prop('disabled', false);
             $('#ett-btn-run-history').prop('disabled', false);
+            $('#ett-btn-run-contracts').prop('disabled', false);
         }
 
 		refreshRunHistory();
@@ -1130,6 +1393,25 @@
 	}
 
     async function cancelJob(){
+    	// If contracts is running (and nothing earlier in the chain is), cancel the contracts job
+    	if (!running && !historyRunning && contractsRunning && contractsJobId) {
+    		if (contractsCancelling) return;
+    		contractsCancelling = true;
+    		$('#ett-btn-cancel').prop('disabled', true).text('Cancelling...');
+    		try {
+    			await ajax('POST', {
+    				action: 'ett_job_cancel',
+    				job_id: contractsJobId,
+    				_ajax_nonce: ETT_ADMIN.nonce
+    			});
+    		} catch (e) {}
+    		stopContractsJob(); // clears contractsRunning — idle watcher blocked by contractsCancelling until after this
+    		$('#ett-contracts-phase').text('Cancelled.');
+    		// Clear flag after a short delay to let any in-flight idle watcher polls complete
+    		setTimeout(function(){ contractsCancelling = false; }, 1500);
+    		return;
+    	}
+
     	// If history is running and prices is not, cancel the history job
     	if (!running && historyRunning && historyJobId) {
     		if (historyCancelling) return;
@@ -1314,15 +1596,17 @@
 
 	$('#ett-btn-run-history').on('click', async function(e){
 		e.preventDefault();
-		if (running || historyRunning) return;
+		if (running || historyRunning || contractsRunning) return;
 
 		$('#ett-btn-run').prop('disabled', true);
 		$('#ett-btn-run-prices').prop('disabled', true);
 		$('#ett-btn-run-history').prop('disabled', true);
+		$('#ett-btn-run-contracts').prop('disabled', true);
 
 		const res = await ajax('POST', {
 			action: 'ett_job_start',
 			job_type: 'history',
+			history_only: 1,
 			_ajax_nonce: ETT_ADMIN.nonce
 		});
 
@@ -1330,11 +1614,39 @@
 			$('#ett-btn-run').prop('disabled', false);
 			$('#ett-btn-run-prices').prop('disabled', false);
 			$('#ett-btn-run-history').prop('disabled', false);
+			$('#ett-btn-run-contracts').prop('disabled', false);
 			alert((res && res.data && res.data.message) ? res.data.message : 'Failed to start history job.');
 			return;
 		}
 
 		startHistoryJob(res.data.job_id, null, false);
+	});
+
+	$('#ett-btn-run-contracts').on('click', async function(e){
+		e.preventDefault();
+		if (running || historyRunning || contractsRunning) return;
+
+		$('#ett-btn-run').prop('disabled', true);
+		$('#ett-btn-run-prices').prop('disabled', true);
+		$('#ett-btn-run-history').prop('disabled', true);
+		$('#ett-btn-run-contracts').prop('disabled', true);
+
+		const res = await ajax('POST', {
+			action: 'ett_job_start',
+			job_type: 'contracts',
+			_ajax_nonce: ETT_ADMIN.nonce
+		});
+
+		if (!res || !res.success){
+			$('#ett-btn-run').prop('disabled', false);
+			$('#ett-btn-run-prices').prop('disabled', false);
+			$('#ett-btn-run-history').prop('disabled', false);
+			$('#ett-btn-run-contracts').prop('disabled', false);
+			alert((res && res.data && res.data.message) ? res.data.message : 'Failed to start contracts job.');
+			return;
+		}
+
+		startContractsJob(res.data.job_id, null, false);
 	});
 
 	$('#ett-btn-cancel').on('click', function(e){
