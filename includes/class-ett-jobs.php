@@ -63,10 +63,13 @@ class ETT_Jobs {
 		self::send_no_cache();
 
 		$job_type = sanitize_key($_POST['job_type'] ?? '');
-		if (!in_array($job_type, ['typeids', 'prices', 'history'], true)) wp_send_json_error('Bad job_type', 400);
+		if (!in_array($job_type, ['typeids', 'prices', 'history', 'contracts'], true)) wp_send_json_error('Bad job_type', 400);
 
 		// prices_only=1 means: run prices but do NOT auto-create a history job on completion.
 		$prices_only = ($job_type === 'prices' && !empty($_POST['prices_only']));
+		// history_only=1 means: run history but do NOT auto-create a contracts job on completion
+		// (used when History is started standalone, not as part of Fetch All's prices -> history -> contracts chain).
+		$history_only = ($job_type === 'history' && !empty($_POST['history_only']));
 
 		ETT_ExternalDB::ensure_schema();
 		$pdo = ETT_ExternalDB::pdo();
@@ -99,7 +102,21 @@ class ETT_Jobs {
         	}
         }
 
-        $job_id = self::create_job($pdo, $job_type, 'browser', $prices_only);
+        if ($job_type === 'contracts') {
+        	$stmt = $pdo->query("
+        		SELECT job_id
+        		FROM ett_jobs
+        		WHERE job_type='contracts' AND status IN ('queued','running')
+        		ORDER BY started_at DESC
+        		LIMIT 1
+        	");
+        	$active = $stmt ? $stmt->fetchColumn() : false;
+        	if ($active) {
+        		wp_send_json_error('A contracts job is already running', 409);
+        	}
+        }
+
+        $job_id = self::create_job($pdo, $job_type, 'browser', $prices_only, $history_only);
 
 		wp_send_json_success([
 			'job_id' => $job_id,
@@ -140,6 +157,8 @@ class ETT_Jobs {
             		$progress = self::step_typeids($pdo, $progress);
             	} elseif ($job['job_type'] === 'history') {
             		$progress = self::step_history($pdo, $progress);
+            	} elseif ($job['job_type'] === 'contracts') {
+            		$progress = self::step_contracts($pdo, $progress);
             	} else {
             		$progress = self::step_prices($pdo, $progress, $job_id);
             	}
@@ -816,6 +835,20 @@ class ETT_Jobs {
 			}
 		}
 
+		// Same chain, one step further: auto-create a contracts job when a
+		// history job completes successfully, UNLESS it was started with
+		// history_only=true (e.g. via a standalone "Run History" button
+		// rather than as part of Fetch All's prices -> history -> contracts
+		// sequence).
+		if ($status === 'done' && isset($progress['job_type']) && $progress['job_type'] === 'history' && empty($progress['history_only'])) {
+			try {
+				$contracts_job_id = self::create_job($pdo, 'contracts', $progress['driver'] ?? 'browser');
+				$progress['contracts_job_id'] = $contracts_job_id;
+			} catch (\Throwable $e) {
+				self::debug_log('[ETT] Could not create contracts job: ' . $e->getMessage());
+			}
+		}
+
 		$now = current_time('mysql');
 		$stmt = $pdo->prepare("
 			UPDATE ett_jobs
@@ -855,7 +888,7 @@ class ETT_Jobs {
         }
 	}
 
-	private static function create_job(PDO $pdo, string $job_type, string $driver, bool $prices_only = false) : string {
+	private static function create_job(PDO $pdo, string $job_type, string $driver, bool $prices_only = false, bool $history_only = false) : string {
 		$job_id = self::uuid4();
 		$now = current_time('mysql');
 
@@ -872,6 +905,10 @@ class ETT_Jobs {
 		// Flag to suppress auto-creation of a history job on completion
 		if ($prices_only) {
 			$progress['prices_only'] = true;
+		}
+		// Flag to suppress auto-creation of a contracts job on completion
+		if ($history_only) {
+			$progress['history_only'] = true;
 		}
 
 		// Prices/typeids-specific fields — not relevant to history jobs
@@ -1488,6 +1525,327 @@ class ETT_Jobs {
 		}
 
 		return $progress;
+	}
+	// phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
+
+	// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- table/column names below are fixed literals, never user input; only bound values use placeholders.
+	/**
+	 * Contract Fetch — third scheduled step, after Prices and History.
+	 * Always Jita specifically (ETT_Admin::hubs()['jita']), matching the
+	 * same "always Jita" choice already made for margin's own market-value
+	 * side. Phases:
+	 *
+	 *   init        — resolve region/station, truncate the candidates table.
+	 *   listing      — walk every page of the region's public contracts,
+	 *                  keeping only item_exchange contracts at the Jita
+	 *                  station (both real structured fields, free to filter
+	 *                  on — no per-contract lookup needed for this part).
+	 *   checking     — for candidates never seen before (LEFT JOIN against
+	 *                  ett_contract_resolved), check contents. Confirmed
+	 *                  single-item BPC matches go into ett_contract_bpc_active
+	 *                  AND ett_contract_resolved; everything else (multi-item,
+	 *                  not a blueprint, a BPO not a BPC, or a blueprint we
+	 *                  don't track) goes into ett_contract_resolved only, so
+	 *                  it's never re-checked again — a contract's contents
+	 *                  can't change once created.
+	 *   aggregating  — per blueprint, per-run price = that listing's own
+	 *                  price ÷ its own actual runs (read directly from ESI,
+	 *                  no guessing). Reject anything under 50% of the median
+	 *                  per-run price as a likely mistake/troll listing, take
+	 *                  the minimum of what survives, store it.
+	 *   pruning      — remove anything from ett_contract_bpc_active and
+	 *                  ett_contract_resolved that's no longer in this run's
+	 *                  candidates table (accepted/expired/cancelled) — using
+	 *                  the same candidates table listing already built, no
+	 *                  extra fetch needed.
+	 */
+	private static function step_contracts(PDO $pdo, array $progress): array {
+		$batch_size = (int) get_option(ETT_Admin::OPT_HISTORY_BATCH_SIZE, 20);
+		if ($batch_size < 1)  $batch_size = 1;
+		if ($batch_size > 50) $batch_size = 50;
+
+		$phase = $progress['phase'] ?? 'init';
+
+		// ── Init ────────────────────────────────────────────────────────
+		if ($phase === 'init') {
+			$hubs = ETT_Admin::hubs();
+			$jita = $hubs['jita'] ?? null;
+			if (!$jita) {
+				$progress['phase']    = 'done';
+				$progress['last_msg'] = 'Jita hub configuration not found — cannot fetch contracts.';
+				return $progress;
+			}
+
+			$pdo->exec('TRUNCATE TABLE ett_contract_candidates');
+
+			$progress['phase']           = 'listing';
+			$progress['region_id']       = (int) $jita['region_id'];
+			$progress['station_id']      = (int) $jita['station_id'];
+			$progress['list_page']       = 1;
+			$progress['list_total_pages'] = 1;
+			$progress['candidates_found'] = 0;
+			$progress['checked_count']    = 0;
+			$progress['matched_count']    = 0;
+			$progress['last_msg']        = 'Initialised. Listing Jita contracts…';
+			return $progress;
+		}
+
+		// ── Listing ─────────────────────────────────────────────────────
+		if ($phase === 'listing') {
+			$region_id  = (int) ($progress['region_id'] ?? 0);
+			$station_id = (int) ($progress['station_id'] ?? 0);
+			$page       = (int) ($progress['list_page'] ?? 1);
+
+			$result = ETT_ESI::public_contracts_page($region_id, $page);
+
+			if (!$result['ok'] && $result['rate_limited']) {
+				$progress['sleep_until'] = time() + max(5, (int) $result['retry_after']);
+				$progress['last_msg']    = 'Rate limited while listing contracts — backing off.';
+				return $progress;
+			}
+			if (!$result['ok']) {
+				// A single failed page doesn't abort the whole run — retry
+				// the same page next step call rather than skipping it
+				// (skipping would silently under-count candidates).
+				$progress['last_msg'] = "HTTP {$result['code']} listing contracts page {$page} — retrying.";
+				return $progress;
+			}
+
+			$progress['list_total_pages'] = max(1, (int) $result['pages']);
+
+			$now = gmdate('Y-m-d H:i:s');
+			$stmt = $pdo->prepare(
+				'INSERT IGNORE INTO ett_contract_candidates (contract_id, price, seen_at) VALUES (:cid, :price, :seen)'
+			);
+			$found_this_page = 0;
+			foreach ($result['data'] as $contract) {
+				if (($contract['type'] ?? '') !== 'item_exchange') continue;
+				if ((int) ($contract['start_location_id'] ?? 0) !== $station_id) continue;
+				$stmt->execute([
+					':cid'   => (int) ($contract['contract_id'] ?? 0),
+					':price' => (float) ($contract['price'] ?? 0),
+					':seen'  => $now,
+				]);
+				$found_this_page++;
+			}
+			$progress['candidates_found'] = (int) ($progress['candidates_found'] ?? 0) + $found_this_page;
+
+			$page++;
+			$progress['list_page'] = $page;
+			$progress['last_msg']  = "Listing contracts: page " . ($page - 1) . "/{$progress['list_total_pages']}, {$progress['candidates_found']} candidates so far.";
+
+			if ($page > (int) $progress['list_total_pages']) {
+				$progress['phase']    = 'checking';
+				$progress['last_msg'] = "Listing complete — {$progress['candidates_found']} candidate contracts found. Checking contents…";
+			}
+			return $progress;
+		}
+
+		// ── Checking ────────────────────────────────────────────────────
+		if ($phase === 'checking') {
+			$stmt = $pdo->prepare(
+				'SELECT c.contract_id, c.price
+				 FROM ett_contract_candidates c
+				 LEFT JOIN ett_contract_resolved r ON r.contract_id = c.contract_id
+				 WHERE r.contract_id IS NULL
+				 LIMIT ' . (int) $batch_size
+			);
+			$stmt->execute();
+			$batch = $stmt->fetchAll();
+
+			if (empty($batch)) {
+				$progress['phase']    = 'aggregating';
+				$progress['last_msg'] = "Contents check complete — {$progress['matched_count']} confirmed BPC listings out of {$progress['checked_count']} checked. Aggregating prices…";
+				return $progress;
+			}
+
+			$now = gmdate('Y-m-d H:i:s');
+			$resolve_stmt = $pdo->prepare(
+				'INSERT INTO ett_contract_resolved (contract_id, matched_blueprint_type_id, checked_at)
+				 VALUES (:cid, :bpid, :now)
+				 ON DUPLICATE KEY UPDATE matched_blueprint_type_id = VALUES(matched_blueprint_type_id), checked_at = VALUES(checked_at)'
+			);
+			$active_stmt = $pdo->prepare(
+				'INSERT INTO ett_contract_bpc_active (contract_id, blueprint_type_id, price, runs, material_efficiency, time_efficiency, checked_at)
+				 VALUES (:cid, :bpid, :price, :runs, :me, :te, :now)
+				 ON DUPLICATE KEY UPDATE blueprint_type_id = VALUES(blueprint_type_id), price = VALUES(price), runs = VALUES(runs), material_efficiency = VALUES(material_efficiency), time_efficiency = VALUES(time_efficiency), checked_at = VALUES(checked_at)'
+			);
+			$tracked_stmt = $pdo->prepare(
+				'SELECT 1 FROM ett_blueprint_products
+				 WHERE blueprint_type_id = :bpid
+				 LIMIT 1'
+			);
+
+			foreach ($batch as $row) {
+				$contract_id = (int) $row['contract_id'];
+				$price       = (float) $row['price'];
+				$progress['checked_count'] = (int) ($progress['checked_count'] ?? 0) + 1;
+
+				$items_result = ETT_ESI::public_contract_items($contract_id);
+				if (!$items_result['ok'] && $items_result['rate_limited']) {
+					// Bail out of this batch entirely rather than burn through
+					// the rest of it while rate-limited — unresolved rows
+					// stay unresolved and get retried next step call.
+					$progress['sleep_until'] = time() + max(5, (int) $items_result['retry_after']);
+					$progress['last_msg']    = 'Rate limited while checking contract contents — backing off.';
+					return $progress;
+				}
+
+				$included = array_values(array_filter($items_result['data'] ?? [], fn($it) => !empty($it['is_included'])));
+				$matched_blueprint_id = null;
+
+				// Multi-item contracts are deliberately skipped, not
+				// partially matched — a bundle's price doesn't correspond
+				// cleanly to any single item inside it.
+				if (count($included) === 1) {
+					$item = $included[0];
+					if (!empty($item['is_blueprint_copy']) && (int) ($item['runs'] ?? 0) > 0) {
+						$bpid = (int) ($item['type_id'] ?? 0);
+						$tracked_stmt->execute([':bpid' => $bpid]);
+						if ($tracked_stmt->fetch()) {
+							$matched_blueprint_id = $bpid;
+							$active_stmt->execute([
+								':cid'   => $contract_id,
+								':bpid'  => $bpid,
+								':price' => $price,
+								':runs'  => (int) $item['runs'],
+								':me'    => (int) ($item['material_efficiency'] ?? 0),
+								':te'    => (int) ($item['time_efficiency'] ?? 0),
+								':now'   => $now,
+							]);
+							$progress['matched_count'] = (int) ($progress['matched_count'] ?? 0) + 1;
+						}
+					}
+				}
+
+				$resolve_stmt->execute([
+					':cid'  => $contract_id,
+					':bpid' => $matched_blueprint_id,
+					':now'  => $now,
+				]);
+			}
+
+			$progress['last_msg'] = "Checked {$progress['checked_count']}/{$progress['candidates_found']} contracts, {$progress['matched_count']} confirmed BPC listings.";
+			return $progress;
+		}
+
+		// ── Aggregating ─────────────────────────────────────────────────
+		if ($phase === 'aggregating') {
+			self::aggregate_bpc_prices($pdo);
+			$progress['phase']    = 'pruning';
+			$progress['last_msg'] = 'Prices computed. Pruning stale contract records…';
+			return $progress;
+		}
+
+		// ── Pruning ─────────────────────────────────────────────────────
+		if ($phase === 'pruning') {
+			$pdo->exec(
+				'DELETE a FROM ett_contract_bpc_active a
+				 LEFT JOIN ett_contract_candidates c ON c.contract_id = a.contract_id
+				 WHERE c.contract_id IS NULL'
+			);
+			$pdo->exec(
+				'DELETE r FROM ett_contract_resolved r
+				 LEFT JOIN ett_contract_candidates c ON c.contract_id = r.contract_id
+				 WHERE c.contract_id IS NULL'
+			);
+			$progress['phase']    = 'done';
+			$progress['last_msg'] = "Contract fetch complete. {$progress['matched_count']} confirmed BPC listings across this run.";
+			return $progress;
+		}
+
+		$progress['phase'] = 'done';
+		return $progress;
+	}
+
+	/**
+	 * Per blueprint: per-run price = that listing's own price ÷ its own
+	 * actual runs (never guessed — read directly from the confirmed
+	 * contract data). Outlier rejection happens WITHIN each distinct run
+	 * count separately, not across all listings pooled together — a 30-run
+	 * copy being cheaper per-run than a 2-run copy is normal bulk pricing
+	 * (fixed listing overhead spread across more runs), not a mistake, and
+	 * comparing them directly would incorrectly reject a legitimately
+	 * cheaper bulk listing as a "troll". Within each run-count bucket,
+	 * anything under 50% of that bucket's own median is discarded as a
+	 * likely mistake/troll listing; the final price is the minimum across
+	 * whatever survives from every bucket.
+	 */
+	private static function aggregate_bpc_prices(PDO $pdo): void {
+		$stmt = $pdo->query('SELECT DISTINCT blueprint_type_id FROM ett_contract_bpc_active');
+		$blueprint_ids = array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+
+		$upsert = $pdo->prepare(
+			'INSERT INTO ett_contract_bpc_prices (blueprint_type_id, per_run_price, winning_price, winning_runs, material_efficiency, time_efficiency, sample_count, computed_at)
+			 VALUES (:bpid, :price, :wprice, :wruns, :me, :te, :n, :now)
+			 ON DUPLICATE KEY UPDATE per_run_price = VALUES(per_run_price), winning_price = VALUES(winning_price), winning_runs = VALUES(winning_runs), material_efficiency = VALUES(material_efficiency), time_efficiency = VALUES(time_efficiency), sample_count = VALUES(sample_count), computed_at = VALUES(computed_at)'
+		);
+		$now = gmdate('Y-m-d H:i:s');
+
+		foreach ($blueprint_ids as $bpid) {
+			$rows_stmt = $pdo->prepare('SELECT price, runs, material_efficiency, time_efficiency FROM ett_contract_bpc_active WHERE blueprint_type_id = :bpid');
+			$rows_stmt->execute([':bpid' => $bpid]);
+
+			// Rows are bucketed by run count and carried through as full
+			// records (not just a bare per-run float) so that whichever
+			// specific listing ends up winning can have its own real price,
+			// runs, and ME%/TE% recorded — not just a derived rate. What
+			// you'd actually pay is the full price of one whole contract,
+			// not a fraction of it, and its ME%/TE% is real research data
+			// worth using directly rather than assuming an unresearched copy.
+			$by_runs = [];
+			$total_sample_count = 0;
+			foreach ($rows_stmt->fetchAll() as $row) {
+				$runs = (int) $row['runs'];
+				if ($runs <= 0) continue; // shouldn't happen (already filtered at checking time), guarded anyway
+				$row['per_run'] = (float) $row['price'] / $runs;
+				$by_runs[$runs][] = $row;
+				$total_sample_count++;
+			}
+			if (empty($by_runs)) continue;
+
+			$all_survivors = [];
+			foreach ($by_runs as $rows) {
+				usort($rows, fn($a, $b) => $a['per_run'] <=> $b['per_run']);
+				$n = count($rows);
+
+				// A single listing at a given run count has nothing within
+				// its own bucket to compare against — it survives by
+				// default rather than being (incorrectly) compared against
+				// listings of a different run count.
+				if ($n === 1) {
+					$all_survivors[] = $rows[0];
+					continue;
+				}
+
+				$per_run_values = array_column($rows, 'per_run');
+				$median = ($n % 2 === 1)
+					? $per_run_values[intdiv($n, 2)]
+					: ($per_run_values[$n / 2 - 1] + $per_run_values[$n / 2]) / 2;
+
+				$cutoff = $median * 0.5;
+				$survivors = array_values(array_filter($rows, fn($r) => $r['per_run'] >= $cutoff));
+				if (empty($survivors)) $survivors = $rows; // shouldn't happen (median itself always survives), guarded anyway
+
+				foreach ($survivors as $s) $all_survivors[] = $s;
+			}
+
+			if (empty($all_survivors)) continue;
+
+			usort($all_survivors, fn($a, $b) => $a['per_run'] <=> $b['per_run']);
+			$winner = $all_survivors[0];
+
+			$upsert->execute([
+				':bpid'   => $bpid,
+				':price'  => $winner['per_run'],
+				':wprice' => (float) $winner['price'],
+				':wruns'  => (int) $winner['runs'],
+				':me'     => (int) $winner['material_efficiency'],
+				':te'     => (int) $winner['time_efficiency'],
+				':n'      => $total_sample_count,
+				':now'    => $now,
+			]);
+		}
 	}
 	// phpcs:enable WordPress.DB.PreparedSQL.NotPrepared
 
