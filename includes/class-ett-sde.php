@@ -742,17 +742,28 @@ final class ETT_SDE {
 	 *
 	 * Uses INSERT IGNORE since the same product typeID can appear in multiple
 	 * blueprint variants (e.g. original + copy).
+	 *
+	 * Also populates ett_blueprint_products (blueprint_type_id ->
+	 * product_type_id) in the same pass, for the contract-price feature —
+	 * a separate table from ett_industryActivityProducts above, which stays
+	 * completely untouched here (still just an existence check other code
+	 * already relies on via a LEFT JOIN on product_type_id alone).
 	 */
 	private static function import_blueprints(ZipArchive $zip, string $entry, PDO $pdo): int {
 		$pdo->exec('TRUNCATE TABLE ett_industryActivityProducts');
+		$pdo->exec('TRUNCATE TABLE ett_blueprint_products');
 
 		$stmt = $pdo->prepare(
 			'INSERT IGNORE INTO ett_industryActivityProducts (product_type_id) VALUES (:pid)'
+		);
+		$stmt_bp = $pdo->prepare(
+			'INSERT IGNORE INTO ett_blueprint_products (blueprint_type_id, product_type_id) VALUES (:bpid, :pid)'
 		);
 
 		$stream = self::open_stream($zip, $entry);
 		$count  = 0;
 		$batch  = [];
+		$batch_bp = [];
 
 		/**
 		 * Depth tracker:
@@ -762,6 +773,7 @@ final class ETT_SDE {
 		 *   3 = inside activities.manufacturing.products:
 		 */
 		$depth = 0;
+		$current_blueprint_id = 0;
 
 		try {
 			while (($line = fgets($stream)) !== false) {
@@ -771,9 +783,17 @@ final class ETT_SDE {
 
 				if ($content === '') continue;
 
-				// New blueprint (0-indent)
+				// New blueprint (0-indent) — the line itself is the
+				// blueprint's own type ID, e.g. "681:". Captured here so
+				// any product found deeper in this block can be paired
+				// with it; ett_industryActivityProducts never needed this,
+				// which is why it was previously discarded entirely.
 				if ($indent === 0) {
 					$depth = 0;
+					$current_blueprint_id = 0;
+					if (preg_match('/^(\d+):/', $content, $bm)) {
+						$current_blueprint_id = (int) $bm[1];
+					}
 					continue;
 				}
 
@@ -819,11 +839,20 @@ final class ETT_SDE {
 						if (count($batch) >= self::BATCH_SIZE) {
 							self::flush_batch($pdo, $stmt, $batch, $count);
 						}
+						if ($current_blueprint_id > 0) {
+							$batch_bp[] = [':bpid' => $current_blueprint_id, ':pid' => $pid];
+							if (count($batch_bp) >= self::BATCH_SIZE) {
+								$bp_count = 0;
+								self::flush_batch($pdo, $stmt_bp, $batch_bp, $bp_count);
+							}
+						}
 					}
 				}
 			}
 
 			self::flush_batch($pdo, $stmt, $batch, $count);
+			$bp_count = 0;
+			self::flush_batch($pdo, $stmt_bp, $batch_bp, $bp_count);
 		} finally {
 			fclose($stream); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		}
