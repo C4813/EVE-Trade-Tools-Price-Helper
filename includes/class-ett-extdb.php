@@ -149,6 +149,140 @@ class ETT_ExternalDB {
 			product_type_id BIGINT UNSIGNED NOT NULL PRIMARY KEY
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
+		// Separate from ett_industryActivityProducts above (that one's an
+		// existence-only check used elsewhere via a LEFT JOIN on
+		// product_type_id — changing its primary key to a composite would
+		// have made that JOIN fan out into duplicate rows wherever a product
+		// has more than one blueprint source, e.g. invented T2 variants).
+		// This table exists specifically for the contract-price feature,
+		// which genuinely needs the blueprint's OWN type_id (to search
+		// contracts for) alongside what it produces — a real many-to-many
+		// relationship the other table was never designed to carry.
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_blueprint_products (
+			blueprint_type_id BIGINT UNSIGNED NOT NULL,
+			product_type_id BIGINT UNSIGNED NOT NULL,
+			PRIMARY KEY (blueprint_type_id, product_type_id),
+			KEY product_type_id (product_type_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// ── Contract Fetch (third scheduled step, after Prices/History) ────
+		//
+		// A contract's contents can never change once created — only its
+		// status does (accepted, expired, or cancelled, at which point it
+		// simply stops appearing in the live list). That means resolving
+		// what's inside a given contract_id is a one-time cost: once
+		// checked, the result stays valid forever, so every run after the
+		// first only needs to check contract_ids never seen before.
+		//
+		// ett_contract_resolved is that permanent "have we already looked
+		// inside this one" record — matched_blueprint_type_id is NULL for
+		// contracts confirmed NOT to be one of our tracked blueprints
+		// (avoids re-checking a known non-match), and set for confirmed
+		// matches. Grows forever except for a housekeeping prune at the end
+		// of each run (contract_ids no longer in the live list are removed
+		// — pure storage cleanup, doesn't affect correctness either way
+		// since a gone contract_id would just never be looked up again
+		// regardless).
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_contract_resolved (
+			contract_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+			matched_blueprint_type_id BIGINT UNSIGNED NULL,
+			checked_at DATETIME NOT NULL,
+			KEY matched_blueprint_type_id (matched_blueprint_type_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// The currently active (still actually purchasable) confirmed BPC
+		// listings — this is what actually feeds the price calculation, and
+		// unlike ett_contract_resolved above, THIS table must be correctness-
+		// pruned every run: if a listing here is no longer in the live list
+		// (accepted/expired/cancelled), it has to come out immediately, or
+		// the price calculation would keep counting an offer nobody can
+		// actually buy anymore. price/runs are exactly what that specific
+		// contract listing showed at the time it was checked — never
+		// recomputed or normalized here; the per-run division happens later,
+		// when aggregating across all active listings for one blueprint.
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_contract_bpc_active (
+			contract_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+			blueprint_type_id BIGINT UNSIGNED NOT NULL,
+			price DECIMAL(20,2) NOT NULL,
+			runs INT UNSIGNED NOT NULL,
+			material_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			time_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			checked_at DATETIME NOT NULL,
+			KEY blueprint_type_id (blueprint_type_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// Migration: add material_efficiency/time_efficiency to existing
+		// installations that predate these columns.
+		foreach (['material_efficiency', 'time_efficiency'] as $col_name) {
+			$col = $pdo->prepare("SELECT COUNT(*) AS c
+				FROM INFORMATION_SCHEMA.COLUMNS
+				WHERE TABLE_SCHEMA = DATABASE()
+					AND TABLE_NAME = 'ett_contract_bpc_active'
+					AND COLUMN_NAME = :col");
+			$col->execute([':col' => $col_name]);
+			if ((int)($col->fetch()['c'] ?? 0) === 0) {
+				$pdo->exec("ALTER TABLE ett_contract_bpc_active ADD COLUMN {$col_name} TINYINT UNSIGNED NOT NULL DEFAULT 0");
+			}
+		}
+		// ISK price per blueprint, after median-based outlier rejection
+		// (anything under 50% of the median price among that blueprint's
+		// active listings is discarded as a likely mistake/troll listing)
+		// then taking the minimum of whatever survives. ett-build-costs
+		// reads only this table; it never touches the two above directly.
+		// Staging table for the listing phase of a contract-fetch run —
+		// truncated at the start of each run, populated with every
+		// item_exchange contract currently at the Jita trade station as
+		// the region's pages are walked. Doubles as "what's actually live
+		// right now" for pruning ett_contract_bpc_active and
+		// ett_contract_resolved at the end of the same run, since by the
+		// time listing finishes this table already holds the exact
+		// current live set — no second fetch needed to know what to prune.
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_contract_candidates (
+			contract_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+			price DECIMAL(20,2) NOT NULL,
+			seen_at DATETIME NOT NULL
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// The final, ready-to-read output — one already-normalized per-run
+		// ISK price per blueprint, after outlier rejection (computed within
+		// each distinct run count separately — a 30-run copy being cheaper
+		// per-run than a 2-run copy is normal bulk pricing, not a mistake)
+		// then taking the minimum of whatever survives across all run-count
+		// groups. Also records the SPECIFIC winning listing's own raw price,
+		// run count, and ME%/TE% — not just the derived per-run rate — so
+		// ett-build-costs can show the real contract's actual numbers (the
+		// full price you'd actually pay, and that copy's real research
+		// level) rather than a reconstructed figure.
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_contract_bpc_prices (
+			blueprint_type_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+			per_run_price DECIMAL(20,2) NOT NULL,
+			winning_price DECIMAL(20,2) NOT NULL,
+			winning_runs INT UNSIGNED NOT NULL,
+			material_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			time_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			sample_count INT UNSIGNED NOT NULL,
+			computed_at DATETIME NOT NULL
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// Migration: add the winning-listing detail columns to existing
+		// installations that predate them.
+		foreach ([
+			'winning_price' => 'DECIMAL(20,2) NOT NULL DEFAULT 0',
+			'winning_runs' => 'INT UNSIGNED NOT NULL DEFAULT 1',
+			'material_efficiency' => 'TINYINT UNSIGNED NOT NULL DEFAULT 0',
+			'time_efficiency' => 'TINYINT UNSIGNED NOT NULL DEFAULT 0',
+		] as $col_name => $col_def) {
+			$col = $pdo->prepare("SELECT COUNT(*) AS c
+				FROM INFORMATION_SCHEMA.COLUMNS
+				WHERE TABLE_SCHEMA = DATABASE()
+					AND TABLE_NAME = 'ett_contract_bpc_prices'
+					AND COLUMN_NAME = :col");
+			$col->execute([':col' => $col_name]);
+			if ((int)($col->fetch()['c'] ?? 0) === 0) {
+				$pdo->exec("ALTER TABLE ett_contract_bpc_prices ADD COLUMN {$col_name} {$col_def}");
+			}
+		}
+
 		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_selected_typeids (
 			type_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
 			generated_at DATETIME NOT NULL
