@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.8.3
+Stable tag: 1.10.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,6 +64,24 @@ No. The importer uses custom streaming line-by-line parsers that handle the SDE 
 marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
 
 == Changelog ==
+
+= 1.10.0 =
+* Contract Fetch now also captures each listing's material_efficiency and time_efficiency (already returned by ESI, previously discarded), and records the SPECIFIC winning listing's own real price, run count, and ME%/TE% — not just a derived per-run rate — in a new winning_price/winning_runs/material_efficiency/time_efficiency columns on ett_contract_bpc_prices. Enables ett-build-costs to show the real contract's actual numbers and use its genuine ME%/TE% as a smarter default than assuming an unresearched copy. Verified the winner-tracking logic picks the correct specific listing (not just any survivor) against both the original troll-rejection scenario and a mixed-ME/TE scenario.
+
+= 1.9.3 =
+* Fixed: the outlier-rejection step in Contract Fetch's price aggregation compared per-run prices across different run counts as if they were one population, incorrectly discarding legitimately cheaper bulk-run BPCs (e.g. a 30-run copy at 12,000/run) as "troll" listings simply because they were cheaper per-run than smaller-run-count copies of the same blueprint — a normal, expected pattern (fixed listing overhead spread across more runs), not a mistake. Outlier rejection now happens within each distinct run count separately, then takes the minimum across whatever survives from every run-count group. Verified against real data (a genuine 12,000/run listing that was being wrongly rejected in favor of 66,666.67) and against the original troll-listing and mixed-run-count test cases, confirming both still behave correctly.
+
+= 1.9.2 =
+* Contract Fetch's blueprint-matching logic no longer filters to blueprints lacking a market_group_id — it now tracks any known manufacturing blueprint, BPO-available or not. Blueprint copies can never be sold via market orders for any item, ever (a hard game rule), so contracts are the only way to price one regardless of BPO availability — the earlier "BPC-only" framing was based on a mistaken assumption. Reaction blueprints remain untracked (unchanged from before — the SDE import only ever captured manufacturing activity), matching ett-build-costs' 0.32.0 decision to treat reaction formulas as owned infrastructure rather than a per-build cost.
+
+= 1.9.1 =
+* Fixed: Contract Fetch's timestamps (checked_at, computed_at) used WordPress's current_time('mysql'), which returns time adjusted to the site's configured timezone rather than genuine UTC. ett-build-costs' own snapshot timestamps use true UTC (gmdate()) — comparing the two directly during troubleshooting made two independently-correct systems look like they disagreed with each other by however many hours the site's timezone differs from UTC. All Contract Fetch timestamps now use gmdate() for consistency with the rest of the pipeline.
+
+= 1.9.0 =
+* Added: Contract Fetch — a new third scheduled step (after Prices and History) that scans Jita's public item_exchange contracts and identifies confirmed blueprint-copy listings for any blueprint that can't be bought as a BPO at all (no market_group_id). Per-listing runs, material efficiency, and time efficiency are read directly from ESI's contract-items response rather than assumed — verified this against a live test call before building on it. Stores one already-normalized per-run ISK price per blueprint (median-based outlier rejection — anything under 50% of the median discarded as a likely mistake/troll listing — then the minimum of what survives), ready for companion plugins to read without any further ESI calls of their own.
+* Added: `ett_blueprint_products` table (blueprint_type_id -> product_type_id), captured during the existing SDE blueprint import in the same pass, without changing `ett_industryActivityProducts`'s existing behavior or structure at all — that table is relied on elsewhere via a plain existence-check JOIN that a primary-key change would have broken into duplicate rows.
+* Added: "Fetch Contracts" button, its own progress panel (phase, page, candidates found, checked, matched, elapsed, heartbeat, ESI status), and full Fetch All chain wiring (Prices -> History -> Contracts). A standalone "Fetch History" click correctly does not drag Contracts along (a `history_only` flag was needed here, mirroring the existing `prices_only` flag for Prices -> History).
+* Performance: the expensive per-contract contents lookup only ever needs to happen once per contract_id — contents can't change once a contract is created, only its status can (accepted/expired/cancelled, at which point it simply leaves the live list). A permanent "already resolved" cache means every run after the first only checks contracts genuinely never seen before, not the full candidate pool each time. Both this cache and the live "currently active BPC listings" table are pruned at the end of each run using that same run's already-fetched contract list — no extra ESI calls needed for pruning.
 
 = 1.8.3 =
 * Fixed: The atomic `RENAME TABLE` swap introduced in 1.8.1 could fail silently on every scheduled run if a leftover `ett_prices_old` table existed from a previous interrupted swap. MySQL's `RENAME TABLE` is atomic — if any target name already exists, the entire statement fails. A crash, timeout, or PHP termination between the RENAME and the subsequent DROP would leave `ett_prices_old` behind permanently, causing every future swap to fail. The staging table received fresh data each run but was never promoted, so `ett_prices` remained frozen while `ett_adjusted_prices` continued to update, gradually eroding calculated profit margins. A `DROP TABLE IF EXISTS ett_prices_old` is now executed before the RENAME to clear any leftover from a prior incomplete swap.
