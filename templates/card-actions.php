@@ -2,7 +2,7 @@
 <div class="ett-card">
 	<h2>Actions</h2>
 
-	<p><strong>Fetch All</strong> pulls prices then automatically runs the history fetch. <strong>Fetch Prices</strong> pulls prices only. <strong>Fetch History</strong> runs the history fetch only.</p>
+	<p><strong>Fetch All</strong> pulls prices, then automatically runs history, then automatically runs contracts. <strong>Fetch Prices</strong> pulls prices only. <strong>Fetch History</strong> runs the history fetch only. <strong>Fetch Contracts</strong> runs the BPC contract-price fetch only.</p>
 
 	<?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- display-only notice flag
 	if (!empty($_GET['perf_saved'])): ?>
@@ -67,6 +67,7 @@
 		<button class="button button-primary"   id="ett-btn-run"         title="Fetch prices then automatically run the history fetch." <?php disabled(!$schema_ok); ?>>Fetch All</button>
 		<button class="button button-secondary" id="ett-btn-run-prices"  title="Fetch prices only."                                     <?php disabled(!$schema_ok); ?>>Fetch Prices</button>
 		<button class="button button-secondary" id="ett-btn-run-history" title="Run the history fetch only."                            <?php disabled(!$schema_ok); ?>>Fetch History</button>
+		<button class="button button-secondary" id="ett-btn-run-contracts" title="Run the BPC contract-price fetch only (always Jita)." <?php disabled(!$schema_ok); ?>>Fetch Contracts</button>
 		<button class="button"                  id="ett-btn-cancel"      disabled>Cancel</button>
 	</div>
 
@@ -166,5 +167,39 @@
 		<div style="text-align:right;font-size:12px;color:#646970;margin-top:3px;" id="ett-history-bar-pct">0%</div>
 
 		<pre class="ett-json" id="ett-history-progress-json">{}</pre>
+	</div>
+
+	<div class="ett-progress ett-mt-10" id="ett-contracts-progress" style="display:none;">
+		<div class="ett-progress-head">
+			<div>
+				<div class="ett-title">Contract Fetch Progress</div>
+				<div class="ett-sub" id="ett-contracts-phase">Idle.</div>
+				<div class="ett-sub" id="ett-contracts-msg">—</div>
+			</div>
+
+			<div class="ett-status-stack">
+				<div class="ett-heartbeat" id="ett-contracts-esi">
+					<span class="ett-dot"></span>
+					<span class="ett-hb-text" id="ett-contracts-esi-text">ESI: Checking...</span>
+				</div>
+
+				<div class="ett-heartbeat" id="ett-contracts-heartbeat" style="display:none;">
+					<span class="ett-dot"></span>
+					<span class="ett-hb-text">No heartbeat</span>
+				</div>
+			</div>
+		</div>
+
+		<p class="description">Always Jita — matches the same "always Jita" choice used for margin's own market-value side.</p>
+
+		<div class="ett-kpis" style="grid-template-columns:repeat(5,1fr);">
+			<div class="ett-kpi"><div class="ett-k">Elapsed</div><div class="ett-v" id="ett-contracts-kpi-elapsed">—</div></div>
+			<div class="ett-kpi"><div class="ett-k">Page</div><div class="ett-v" id="ett-contracts-kpi-page">—</div></div>
+			<div class="ett-kpi"><div class="ett-k">Candidates Found</div><div class="ett-v" id="ett-contracts-kpi-candidates">—</div></div>
+			<div class="ett-kpi"><div class="ett-k">Checked</div><div class="ett-v" id="ett-contracts-kpi-checked">—</div></div>
+			<div class="ett-kpi"><div class="ett-k">Matched BPCs</div><div class="ett-v" id="ett-contracts-kpi-matched">—</div></div>
+		</div>
+
+		<pre class="ett-json" id="ett-contracts-progress-json">{}</pre>
 	</div>
 </div>
