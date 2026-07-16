@@ -155,6 +155,100 @@ class ETT_ESI {
 	 *   int|null reset
 	 * }
 	 */
+	/**
+	 * Shared response handling for both public-contracts endpoints — same
+	 * shape/conventions as orders_page_common() above, just named for its
+	 * own callers. X-Pages is read the same way region_orders_page()'s
+	 * caller already reads it elsewhere (this method only returns the raw
+	 * decoded body + headers; pagination looping is the caller's job, same
+	 * division of responsibility as the existing market-orders methods).
+	 */
+	private static function contracts_page_common($resp) : array{
+		if (is_wp_error($resp)){
+			return [
+				'ok' => false,
+				'code' => 0,
+				'data' => [],
+				'rate_limited' => false,
+				'retry_after' => 5,
+				'note' => $resp->get_error_message(),
+				'pages' => 1,
+			];
+		}
+
+		$code = (int)wp_remote_retrieve_response_code($resp);
+		$hdrs = wp_remote_retrieve_headers($resp);
+		$pages = self::header_get($hdrs, 'x-pages');
+		$pages = ($pages === null) ? 1 : max(1, (int)$pages);
+
+		// 204 is a real, expected outcome specifically for the per-contract
+		// items call — "contract expired or was recently accepted" — not an
+		// error. Treated the same as "no items" so a caller can just move on
+		// to the next contract_id without special-casing this response code
+		// itself.
+		if ($code === 204){
+			return ['ok' => true, 'code' => 204, 'data' => [], 'rate_limited' => false, 'retry_after' => null, 'note' => null, 'pages' => $pages];
+		}
+
+		if ($code === 404){
+			return ['ok' => true, 'code' => 404, 'data' => [], 'rate_limited' => false, 'retry_after' => null, 'note' => null, 'pages' => $pages];
+		}
+
+		if ($code === 420 || $code === 429){
+			$ra = self::header_get($hdrs, 'retry-after');
+			$retry_after = ($ra !== null && is_numeric($ra)) ? (int)$ra : 5;
+			$body = substr((string)wp_remote_retrieve_body($resp), 0, 200);
+			return ['ok' => false, 'code' => $code, 'data' => [], 'rate_limited' => true, 'retry_after' => $retry_after, 'note' => $body, 'pages' => $pages];
+		}
+
+		if ($code < 200 || $code >= 300){
+			$body = substr((string)wp_remote_retrieve_body($resp), 0, 200);
+			return ['ok' => false, 'code' => $code, 'data' => [], 'rate_limited' => false, 'retry_after' => 5, 'note' => $body, 'pages' => $pages];
+		}
+
+		$data = json_decode(wp_remote_retrieve_body($resp), true);
+		return ['ok' => true, 'code' => $code, 'data' => is_array($data) ? $data : [], 'rate_limited' => false, 'retry_after' => null, 'note' => null, 'pages' => $pages];
+	}
+
+	/**
+	 * One page of public contracts in a region. No content, no title, no
+	 * indication of what's inside — just contract-level metadata (price,
+	 * type, dates, locations). Checking what's actually inside a contract
+	 * requires public_contract_items() below, called separately per
+	 * contract_id.
+	 */
+	public static function public_contracts_page(int $region_id, int $page) : array{
+		$url = self::BASE . "/contracts/public/{$region_id}/?page={$page}";
+		$resp = wp_remote_get($url, [
+			'timeout' => 30,
+			'headers' => [
+				'Accept' => 'application/json',
+				'User-Agent' => 'WordPress/ETT-Price-Helper; ' . home_url('/'),
+			],
+		]);
+		return self::contracts_page_common($resp);
+	}
+
+	/**
+	 * The items inside one public contract. For a blueprint item
+	 * specifically, this includes is_blueprint_copy/runs/material_efficiency/
+	 * time_efficiency — confirmed directly against a live call, not assumed
+	 * from documentation alone. A 204 (contract gone) or 404 both come back
+	 * as ok:true with an empty data array — the caller doesn't need to
+	 * distinguish "gone" from "empty", both mean nothing more to do here.
+	 */
+	public static function public_contract_items(int $contract_id) : array{
+		$url = self::BASE . "/contracts/public/items/{$contract_id}/";
+		$resp = wp_remote_get($url, [
+			'timeout' => 30,
+			'headers' => [
+				'Accept' => 'application/json',
+				'User-Agent' => 'WordPress/ETT-Price-Helper; ' . home_url('/'),
+			],
+		]);
+		return self::contracts_page_common($resp);
+	}
+
 	public static function market_prices() : array{
 		$url = self::BASE . '/markets/prices/?datasource=tranquility';
 
