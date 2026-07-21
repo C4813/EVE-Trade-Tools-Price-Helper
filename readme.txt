@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.10.0
+Stable tag: 1.22.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -65,6 +65,44 @@ marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprin
 
 == Changelog ==
 
+= 1.22.0 =
+* Critical fix: every scheduled, cron-driven Contract Fetch run has been silently
+  running the PRICES fetch logic instead, under a "contracts" label — meaning BPC
+  contract data was never actually refreshed via scheduled cron at all, only ever by
+  a manual, browser-driven run. Root cause: class-ett-runner.php's own job dispatch
+  only ever checked for job_type 'history' explicitly, falling through to
+  step_prices() for anything else — including 'contracts'. This was a completely
+  separate, never-updated dispatch path from the correct one already used for manual
+  runs (class-ett-jobs.php's ajax_step(), which already handled 'contracts'
+  correctly). Explains the exact symptoms reported: prices-style messages ("Hub hek
+  Primary...", "All hubs and adjusted prices complete...") appearing under Contract
+  Fetch Progress, and consistent ~5 minute "contract fetch" durations far too short
+  for genuine contract checking. Added the missing step_contracts() dispatch and
+  reflection wrapper (mirroring the existing step_prices/step_history ones), fixed
+  in both places this dispatch appears. Verified directly: all 3 job types now
+  correctly route to their own respective step functions.
+
+= 1.19.0 – 1.21.0 = Barter/item-payment contracts fully excluded from pricing, in two parts. First: any contract with at least one is_included=false item (EVE's "also request items from buyer" — the buyer pays partly or entirely in items, not ISK) is now excluded, since its price field alone doesn't represent the true acquisition cost and could make an otherwise-expensive blueprint look artificially cheap. Second, found after a real report that the fix wasn't taking effect even after a full truncate-and-re-pull: the checking phase only ever inserted/updated on a match, never removed a row when a re-check found a contract no longer matches. A contract that matched under the OLD rule but is still genuinely listed survives pruning and gets correctly re-excluded on re-check — but its stale row from the earlier match was never actively deleted, sitting there indefinitely. Now explicitly deleted whenever a re-check resolves to no match. Verified both parts directly against the real reported scenario end to end.
+
+= 1.17.0 – 1.18.0 = Chased down the real root cause behind a purchased/expired contract still being usable well after it should have been gone, even right after a fresh Contract Fetch run. Two real, contributing issues found: (1) aggregate_bpc_prices() only ever revisits a blueprint currently in ett_contract_bpc_active — once a blueprint's last active listing drops out, nothing ever touched its old row in ett_contract_bpc_prices/ett_contract_bpc_candidates again, letting a stale winner persist indefinitely; now pruned every run. (2) The bigger one: pruning ran AFTER aggregating, not before — a contract matched in a previous run stays cached (checking only adds new matches, never re-verifies old ones), so if it had since been purchased, aggregation would still read it as valid and compute a winner from it before pruning deleted it moments later. Phase order is now listing -> checking -> pruning -> aggregating -> done, so aggregation only ever works from already-current data. Both verified directly against the exact failure scenario.
+
+= 1.16.0 – 1.20.0 = Chased down the full extent of the deadlock bug class (SQLSTATE[40001]) across two rounds. First: ETT_Jobs' own update_status(), heartbeat(), finish(), and create_job() — the ones actually used by the browser/AJAX "Fetch All"/Cancel buttons, not the external-cron path that already had protection — had no deadlock-retry at all, so a Cancel click racing an in-flight heartbeat poll had nothing to fall back on. Second, found later from a real error log: the actual bulk price/market-data writes during a prices run (ett_prices_staging on both the standard and private-hub paths, ett_adjusted_prices, ett_market_history) were a completely separate, still-unprotected set of writes to different tables entirely. All eight write sites now use the same retry mechanism (3 retries, 50/100/150ms backoff). Verified the retry logic itself against 4 scenarios, and verified the wrapped writes work correctly end-to-end against a real, native-prepares connection.
+
+= 1.15.0 =
+* Fixed a real bug in outlier rejection: listings were bucketed by run count alone, so two listings sharing a run count but representing genuinely different ME levels (e.g. an 8ME copy at 400m vs a 9ME copy at 2b, both 1-run) got compared against each other and the cheaper, lower-ME one was incorrectly discarded as if it were a troll/mistake listing. Now buckets by run count AND ME%/TE% combined, so outlier rejection only ever compares listings claiming to be the same thing — genuinely different ME options at the same run count no longer get silently thrown away, which directly affects how good a candidate pool the total-cost optimizer in ett-build-costs has to work with. Verified against 3 scenarios: the original troll-rejection case (unaffected, still correctly rejects a genuine mistake-priced listing), the newly-discovered issue (both ME levels now correctly preserved), and a combined case with both patterns present simultaneously (troll rejected within its own ME group, a legitimately different ME listing at the same run count survives independently).
+
+= 1.14.0 =
+* Added contract_id to ett_contract_bpc_prices and ett_contract_bpc_candidates — foundation for an upcoming "Open Contract In-Game" feature in ett-build-costs. ett_contract_bpc_active already had contract_id (always has, since the first version of Contract Fetch); the gap was purely that aggregate_bpc_prices() never carried it forward into the downstream tables. No re-pull needed — the very next normal Contract Fetch run (aggregation runs unconditionally every cycle) will populate it for every currently-active listing, including ones matched long before this update. Verified directly against both a same-run-count scenario (which correctly exercises existing outlier rejection, unrelated to this change) and a differing-run-count scenario, confirming contract_id threads through correctly to both the winner and candidates tables in each case.
+
+= 1.13.0 =
+* Added (foundation, existing behavior untouched): a new ett_contract_bpc_candidates table now preserves every genuinely distinct (ME%, TE%) combination that survives outlier rejection for a blueprint, not just the single overall cheapest — needed because "cheapest to acquire" and "cheapest once real material waste is factored in" are different questions, and a more expensive, better-researched candidate can still win once total build cost is considered. The existing ett_contract_bpc_prices single-winner table is completely unchanged, verified directly to still pick the exact same result as before. Purely additive — nothing currently reads the new table yet.
+
+= 1.12.0 =
+* Added: Contract Fetch now records the full contents of multi-blueprint-type contracts (mixed bundles that can't be fairly priced per-item on their own) as pack candidates — every distinct tracked blueprint found, grouped by type/ME%/TE%, plus the contract's total price and whether any non-blueprint or untracked items were also present. This doesn't decide "is this a valid build pack" itself (that requires knowing a specific hull's real requirements, which only ett-build-costs can determine) — it just records what's actually inside a contract for that later comparison. New ett_contract_packs and ett_contract_pack_items tables, pruned at the end of each run the same way existing contract tables already are. Verified directly against 5 scenarios: multiple distinct tracked blueprints with no extras, a blueprint mixed with a non-blueprint item, a tracked blueprint mixed with an untracked one, a clean same-type bulk match correctly NOT also being stored as a pack, and a contract with no blueprints at all correctly producing nothing. Also verified pruning correctly removes a stale contract's multiple composite-key rows while preserving an still-active one's.
+
+= 1.11.0 =
+* Added: Contract Fetch now looks inside multi-item contracts instead of skipping them entirely. A bundle of several genuinely identical BPC copies (same blueprint, same ME%/TE%) is now priced correctly as one bulk listing — total contract price divided by the summed runs across every copy, e.g. 5x 5-run 10/20 copies for 80m becomes 3.2m/run. Bundles mixing different blueprint types, or blueprints mixed with non-blueprint items, are deliberately still excluded — there's no way to fairly attribute a lump sum across genuinely different items, and guessing at a split risked a confidently-wrong number rather than a known gap. No new ESI calls needed — every item in a contract was already being fetched, just discarded past the first one before now. New winning_quantity column records how many copies contributed to a winning bulk listing, for future display use. Verified directly against the motivating real-world example.
+
 = 1.10.0 =
 * Contract Fetch now also captures each listing's material_efficiency and time_efficiency (already returned by ESI, previously discarded), and records the SPECIFIC winning listing's own real price, run count, and ME%/TE% — not just a derived per-run rate — in a new winning_price/winning_runs/material_efficiency/time_efficiency columns on ett_contract_bpc_prices. Enables ett-build-costs to show the real contract's actual numbers and use its genuine ME%/TE% as a smarter default than assuming an unresearched copy. Verified the winner-tracking logic picks the correct specific listing (not just any survivor) against both the original troll-rejection scenario and a mixed-ME/TE scenario.
 
@@ -83,174 +121,7 @@ marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprin
 * Added: "Fetch Contracts" button, its own progress panel (phase, page, candidates found, checked, matched, elapsed, heartbeat, ESI status), and full Fetch All chain wiring (Prices -> History -> Contracts). A standalone "Fetch History" click correctly does not drag Contracts along (a `history_only` flag was needed here, mirroring the existing `prices_only` flag for Prices -> History).
 * Performance: the expensive per-contract contents lookup only ever needs to happen once per contract_id — contents can't change once a contract is created, only its status can (accepted/expired/cancelled, at which point it simply leaves the live list). A permanent "already resolved" cache means every run after the first only checks contracts genuinely never seen before, not the full candidate pool each time. Both this cache and the live "currently active BPC listings" table are pruned at the end of each run using that same run's already-fetched contract list — no extra ESI calls needed for pruning.
 
-= 1.8.3 =
-* Fixed: The atomic `RENAME TABLE` swap introduced in 1.8.1 could fail silently on every scheduled run if a leftover `ett_prices_old` table existed from a previous interrupted swap. MySQL's `RENAME TABLE` is atomic — if any target name already exists, the entire statement fails. A crash, timeout, or PHP termination between the RENAME and the subsequent DROP would leave `ett_prices_old` behind permanently, causing every future swap to fail. The staging table received fresh data each run but was never promoted, so `ett_prices` remained frozen while `ett_adjusted_prices` continued to update, gradually eroding calculated profit margins. A `DROP TABLE IF EXISTS ett_prices_old` is now executed before the RENAME to clear any leftover from a prior incomplete swap.
-
-= 1.8.2 =
-* Added: Extension hooks `ett_prices_hub_start` and `ett_prices_raw_orders_page` fired during price runs, and `ett_prices_history_results` fired during history runs. These allow companion plugins to capture raw order-book and daily history data without making independent ESI calls.
-* Fixed: Output escaping applied to plugin name and GitHub URL in the changelog card. `wp_unslash()` and `absint()` now used consistently for all `$_POST` inputs in private hub AJAX handlers.
-* Fixed: Run history card now populates immediately on page load rather than only after a job completes or the history toggle is opened.
-* Fixed: Stable tag in readme.txt now matches plugin version header.
-
-= 1.8.1 =
-* Fixed: "Potential Daily Profit" in ETT Reprocess Trading degraded on every scheduled run due to two compounding bugs in the price fetch pipeline. First, the `ON DUPLICATE KEY UPDATE` upsert used `GREATEST`/`LEAST` to merge ESI order pages correctly within a single run, but also persisted that aggregation across runs — causing `buy_max` (item cost) to ratchet up and `sell_min` (material revenue) to ratchet down with each execution, permanently compressing margins even when market conditions were stable. Second, failed ESI responses (non-200) still wrote `avg_daily_volume = 0` to `ett_market_history`, overwriting previously valid volume figures and silently removing items from results on subsequent runs.
-* Changed: Price data is now written to a staging table (`ett_prices_staging`) during each run and promoted to the live `ett_prices` table via an atomic `RENAME TABLE` only on successful completion. This means the reprocess tool always reads from a complete, consistent snapshot; a failed or interrupted run leaves the live table untouched. The `GREATEST`/`LEAST` aggregation is preserved — it still correctly merges data across ESI pages within a single run — but can no longer accumulate drift across runs.
-* Fixed: Failed ESI history responses (non-200 HTTP codes) no longer write a zero `avg_daily_volume` to `ett_market_history`. Items that could not be fetched retain their last known volume, preventing them from being incorrectly filtered out by the minimum volume threshold on subsequent runs.
-
-= 1.8.0.1 =
-* Fixed: Changelog stopped rendering after the first occurrence of `== ` anywhere in the content — including mid-line substrings such as `=== 5` in code examples. The section-boundary regex now requires `==` to be at the start of a line, so inline `==` in changelog text no longer truncates the output.
-
-= 1.8.0 =
-* Added: **Private Trade Hubs** — a new card below the Trade Hubs card allows one or more private market structures (alliance citadels, Upwell structures) to be configured as additional trade hubs. Each private hub has its own system name with autocomplete powered by `ett_mapSolarSystems`, an independent character authentication (either the primary SSO character or a dedicated private character), and a selectable list of accessible structures fetched live from ESI. Multiple private hubs are supported; each can be added or removed independently.
-* Added: Private hub prices are written to `ett_prices` using the system name as the hub key (e.g. `c-n4od`), which ETT Reprocess Trading reads automatically via `DISTINCT hub_key` — no additional configuration required.
-* Added: Private hub market history is fetched for the region the configured system belongs to, deduplicated against other hubs that share the same region.
-* Added: Deselecting all standard trade hubs is now respected — a price or history run will skip standard hubs entirely and process only private hubs if any are configured. Previously, deselecting all hubs caused the run to silently fall back to all five standard hubs.
-* Added: **Changelog tab** on the EVE Trade Tools admin page — automatically detects all active `ett-*` plugins, reads their `readme.txt`, and renders each plugin's changelog section with a link to its GitHub repository. New ETT plugins appear here automatically.
-* Added: `mapSolarSystems.yaml` as an optional step 6 in the SDE import. When present in the ZIP, it populates `ett_mapSolarSystems` (`solar_system_id`, `name`, `region_id`), which powers private hub system name autocomplete and canonical name display throughout the plugin. Missing from the ZIP is handled gracefully — the other five files still import normally.
-* Added: Job progress hub labels for private hubs now use the canonical in-game system name queried from `ett_mapSolarSystems` rather than an uppercased version of the sanitized key. The `private_hub_N` internal key is also resolved to the display name via a dynamic map passed to JS.
-* Added: History progress `last_msg` now shows in orange when rate limiting or ESI errors are active, consistent with the prices progress display.
-* Added: `Heartbeat: OK` label now includes a colon, consistent with `ESI: OK`.
-* Fixed: SDE import AJAX step handler had a hardcoded `$step > 5` guard that rejected step 6, and the final-step summary logic was hardcoded to `$step === 5`. Both now derive the boundary from `count(ETT_SDE::STEPS)`.
-* Fixed: The JavaScript `SDE_STEPS` array was missing the `mapSolarSystems.yaml` entry, so step 6 was never called even after the PHP changes added it.
-* Fixed: ZIP file uploads were rejected with "not allowed to upload this file type" on some server configurations where `finfo`/`mime_content_type` returns `application/octet-stream` or `application/x-zip-compressed` instead of `application/zip`. A `wp_check_filetype_and_ext` filter now force-allows `.zip` files regardless of server MIME detection.
-* Fixed: SDE card stated the full SDE ZIP was ~1 GB; corrected to ~40 MB compressed. The misleading "nested paths such as `sde/fsd/` are handled" text was also removed — the SDE does not use nested paths.
-* Fixed: Private hub `region_id` was not included as a hidden field in the PHP-rendered hub card, causing every save after a page reload to overwrite it with 0. The job-run guard `$region_id <= 0` then silently excluded the private hub from the price run entirely.
-* Fixed: Structure `enabled` state was always lost on save when the hub card was rendered by PHP (as opposed to JS-built new hubs). The PHP checkbox format (`structures[STRUCT_ID] = 1`) and the JS object-array format are now both handled by `ajax_priv_save_hub`.
-* Fixed: `ajax_save_hubs` overwrote an empty hub selection with all five standard hubs before saving. Deselecting all hubs now persists correctly.
-
-= 1.7.0.1 =
-* Fixed: PHPCS — `$step` and `$entry` in exception messages in `class-ett-sde.php` were not passed through an escaping function; both now use `esc_html()`.
-* Fixed: PHPCS — `$_FILES['sde_zip']` in both `handle_import_sde()` and `ajax_sde_prepare()` triggered `InputNotSanitized` warnings; `phpcs:ignore` comments updated with explicit justification (security enforced by `is_uploaded_file()` / `wp_handle_upload()`, not sanitization).
-* Fixed: PHPCS — `move_uploaded_file()` is forbidden under WordPress coding standards; replaced with `wp_handle_upload()` using a temporary `upload_dir` filter to direct the file into the `sde-tmp/` subdirectory.
-* Fixed: PHPCS — `$_POST['step']` cast with bare `(int)` in `ajax_sde_import_step()`; replaced with `absint()` which PHPCS recognises as explicit sanitization.
-
-= 1.7.0 =
-* Breaking change: Fuzzwork import removed entirely. Static reference data is now imported directly from the official EVE Static Data Export (SDE) ZIP from developers.eveonline.com. A fresh install and new SDE import are required — no backward compatibility with 1.6.x.
-* New: ETT_SDE class with streaming line-by-line YAML parsers for all five required files. No PHP YAML extension needed; memory use stays low regardless of file size.
-* New: SDE Import admin card replaces the Fuzzwork Import card. Supports two import methods — Option A: ZIP file upload via browser; Option B: server-side absolute path for hosts where upload limits make the ~1 GB ZIP impractical to upload over HTTP.
-* New: Import runs as five sequential AJAX calls (one per YAML file) rather than a single synchronous form POST. A progress bar and step log update live as each file completes, showing the row count written per table. An animated ellipsis on the status line confirms activity during each step so the UI never appears frozen.
-* New: Market Groups card tree auto-populates immediately after a successful SDE import without requiring a page refresh. The Generate TypeIDs button is re-enabled at the same time.
-* New: SDE import Option A / Option B forms appear immediately when DB settings are saved and the schema becomes ready, without requiring a page refresh.
-* Changed: invMetaTypes is now populated from types.yaml — each type carries a metaGroupID field directly, so no separate source file is required.
-* Changed: industryActivityProducts is now populated from blueprints.yaml, filtering to manufacturing activities only (equivalent to the previous activityID = 1 filter on industryActivityProducts.csv).
-* Changed: Minimum PHP version raised to 8.0.
-* Removed: class-ett-fuzzwork.php and card-fuzzwork.php deleted. Uninstall cleans up ett_sde_last_import_meta only.
-
-= 1.6.2 =
-* Fixed: buy_max inflated by buy orders that cannot be fulfilled at the target station. ESI returns all buy orders region-wide; the plugin was filtering by location_id only, allowing wide-range buy orders to set an artificially high buy_max. Buy orders are now filtered by their range field — station-range orders must match the target station_id, solarsystem-range orders must match the hub system_id, region-range orders are always included, and jump-range orders are conservatively excluded. Secondary and tertiary structure sources are unaffected.
-
-= 1.6.1 =
-* Internal: Template files moved from templates/price-helper/ to templates/.
-
-= 1.6.0 =
-* Changed: Action buttons renamed for clarity — "Run All" is now "Fetch All", "Run Prices" is now "Fetch Prices", and "Run History" is now "Fetch History". Descriptive tooltips added to each button.
-* Internal: All admin card HTML extracted from ETT_Admin::render() into dedicated template files under templates/price-helper/ — one file per card (External Database, Fuzzwork Import, EVE SSO, Market Groups, Trade Hubs, Actions, Schedule, Run History).
-* Internal: Three inline <script> blocks (schedule pause/resume, copy buttons + token regeneration, clear history) moved into assets/admin.js. No behaviour change.
-* Internal: sched_enabled and home_url added to the ETT_ADMIN localised data object.
-* Internal: Added private ETT_Admin::render_template() helper for scoped template inclusion.
-
-= 1.5.1 =
-* Performance: History fetch default concurrency raised from 5 to 20; maximum raised to 50. Users who had never explicitly saved the concurrency setting were running at the original slow rate of 5 regardless of the cap changes in 1.5.0.
-* Performance: History fetch sub-group overhead eliminated — all items in a batch now fire in a single curl_multi call with no inter-group sleep gaps.
-* Added: Run Prices button — runs prices only, does not auto-start a history fetch on completion.
-* Added: Run History button — runs history fetch independently of a price run.
-* Changed: Former "Run Prices" button renamed to "Run All" (behaviour unchanged — prices followed by automatic history fetch).
-* Added: Concurrency KPI tile in the history fetch progress panel showing the active concurrency value in use.
-* Added: ESI status indicator in the history fetch progress panel, mirroring the indicator on the prices panel. Appears above the heartbeat indicator.
-* Fixed: Heartbeat indicator on the prices panel stuck on "Waiting for heartbeat" despite the job actively stepping. Root cause was a server/browser timezone mismatch — heartbeat_at is returned as a WordPress local-time MySQL timestamp with no timezone suffix, which new Date() parsed as browser local time, making the staleness delta incorrect. Receipt time is now recorded locally in the browser at the moment the response arrives.
-* Fixed: Same timezone-mismatch fix applied to the history fetch heartbeat indicator.
-* Fixed: "Waiting for heartbeat" shown immediately for cron-driven jobs even on a fresh heartbeat due to an erroneous observeOnly guard on the 15-second green threshold.
-* Fixed: Cancelling a history fetch restarted it. Redundant create_job('history') calls in the runner duplicated the job that finish_job() already creates; the idle-attach watcher picked up the second queued job immediately after cancel.
-* Misc: Removed empty activation and deactivation hook stubs from the main plugin file.
-
-= 1.5.0 =
-* Changed: WP-Cron removed entirely as the scheduling mechanism. Scheduled runs are now driven by an external cron service (e.g. Hostinger cPanel, crontab) pinging a token-authenticated HTTP endpoint (`/?ett_ph_run=TOKEN`) every minute. Each ping works for the full PHP execution window before saving state, so a 10–20 minute run completes across a handful of pings with no timeout risk.
-* Changed: Schedule card redesigned — flat layout with Start time, Run every, and a new Next scheduled run field. Cron setup section provides a ready-to-use curl command (Option A, any host) and a WP-CLI command (Option B, requires SSH) with copy buttons.
-* Added: Pause Schedule / Resume Schedule button on the Schedule card. When paused, no new price runs are triggered by incoming cron pings; any in-progress job completes normally. The Next scheduled run field updates immediately to reflect the paused state.
-* Added: Run History card below the Schedule card showing both Price runs and History fetch jobs. Columns: Type, Started, Finished, Status, Driver, Last message. Previously only price runs were listed, and the table was hidden inside a collapsible dropdown.
-* Added: Clear History button in the Run History card header. Removes all completed (done/error/cancelled) job records; active and queued jobs are unaffected.
-* Fixed: History fetch was skipping all secondary structures despite EVE SSO being authenticated. The access-token gate (`get_access_token_for_jobs()`) only permitted `is_admin()`, WP-Cron, and WP-CLI contexts — system-cron HTTP pings matched none of these, causing a silent `forbidden_context` fallback. The gate now also permits requests arriving via `?ett_ph_run=TOKEN`.
-* Fixed: PHP execution deadline calculated from `REQUEST_TIME` (arrival of HTTP request) rather than the current moment, causing the work loop to expire before doing any work on slow shared hosts where WordPress boot consumes several seconds of the time limit. Deadline is now calculated from `microtime(true)` using remaining budget.
-* Fixed: History fetch rate limiting caused by firing all parallel ESI requests simultaneously. `curl_multi_history()` now sends requests in sub-groups of up to `concurrency` simultaneous connections with a 500 ms gap between sub-groups, and reads the `X-Esi-Error-Limit-Remain` response header — if the error budget drops below 10, remaining items in the batch are skipped and the 60-second backoff is triggered automatically.
-* Changed: History fetch concurrency default lowered from 15 to 5; maximum capped at 20. The setting now controls sub-group size (parallel connections per burst) rather than total batch size.
-* Fixed: Heartbeat stale warning fired after ~15 seconds for cron-driven jobs, which update only once per minute. Threshold is now 90 seconds for system-cron jobs (15 seconds for manual browser-driven jobs). Warning text for cron jobs now reads "Waiting for next cron ping — heartbeat updates once per minute." rather than implying a stall.
-* Fixed: History fetch progress panel flickered back to "Starting history fetch…" when re-attaching to an already-running job. `startHistoryJob()` now accepts and renders the existing progress immediately on attach.
-* Fixed: Cancel History required two clicks. The idle-attach watcher (polling every 1 s) would re-attach to the still-running DB job in the gap between `stopHistoryJob()` clearing `historyRunning` and the cancel AJAX landing on the server. The `historyCancelling` flag is now held for 1.5 s after the AJAX resolves, blocking spurious re-attachment.
-* Fixed: Deadlock (MySQL error 1213) when two overlapping cron pings both tried to write to the same job row simultaneously. A concurrent-ping guard now bails out immediately if a heartbeat was written within the last 30 seconds, and `update_status()`, `heartbeat()`, and `finish_job()` retry up to 3 times with exponential back-off on SQLSTATE 40001.
-* Fixed: `is_run_due()` ignored `start_time` after the first run, anchoring subsequent runs to `last_run + freq_hours` instead. Runs are now anchored to the configured start time regardless of when the previous run completed — with start_time 10:32 and freq 24 h, every run fires at 10:32 daily.
-* Fixed: Idle-attach watcher interval reduced from 5 s to 1 s; status poll interval reduced from 2 s to 1 s for faster UI attach on cron-driven jobs.
-
-= 1.4.4 =
-* Fixed: `Domain Path` header in the plugin file referenced a `languages/` directory that did not exist, producing a validation warning. The header has been removed as the plugin does not include any translation files.
-* Fixed: Upgrade notice for 1.4.3 exceeded the 300-character limit. Notice has been trimmed to a concise summary.
-
-= 1.4.3 =
-* Fixed: `portionSize` was not stored in `ett_invTypes` — the column was absent from both the schema definition and the Fuzzwork CSV importer, causing ETT Reprocess Trading to treat every item as a batch size of 1. Items with a portionSize greater than 1 (e.g. ammunition at 100) produced reprocessed values inflated by the full portionSize factor.
-* Changed: `ett_invTypes` now includes a `portionSize` column. `ensure_schema()` will automatically add the column to existing installations via `ALTER TABLE` on next plugin load.
-* Changed: Fuzzwork `invTypes` CSV importer now reads and stores `portionSize` for every type.
-* Note: a re-run of the Fuzzwork import is required after upgrading to populate portionSize values. Until then, all rows default to 1.
-
-= 1.4.2 =
-* Fixed: Saving SSO settings without re-entering the Client Secret wiped the stored secret — the form never pre-fills the decrypted secret, so submitting with a blank field now preserves the existing value, matching the behaviour of the database password field.
-* Fixed: Plugin deactivation left the `ett_ph_history_tick` WP-Cron hook scheduled and the `ett_ph_cron_history_job_id` option in the database. Both are now cleaned up on deactivation.
-* Fixed: Job history table rendered with a malformed opening tag — the `<table>` element was missing its closing `>`, which caused the table headers to render incorrectly in strict browsers.
-* Security: EVE SSO Client Secret is no longer written into the page source. The secret field now always renders empty; a placeholder indicates whether a secret is already saved. This prevents the decrypted value from appearing in HTML source or browser developer tools.
-* Security: PDO connections to the external database now use real server-side prepared statements (`ATTR_EMULATE_PREPARES => false`), replacing the previous PHP-emulated parameterisation.
-
-= 1.4.1 =
-* Fixed: History fetch concurrency setting not saving — the Advanced performance form was not including the `history_batch_size` field in its AJAX request, so changes to that setting were silently discarded.
-* Fixed: Plugin options not fully cleaned up on uninstall — `ett_ph_cron_history_job_id`, `ett_history_batch_size`, and the `ett_ph_history_tick` WP-Cron hook were not removed during uninstall. Note: the external database is intentionally never modified by uninstall.
-* Fixed: Price table wiped at the start of each run — `ett_prices` was truncated before new data was written, creating a window where consumers could read an empty or incomplete dataset. Prices are now overwritten in-place via `INSERT … ON DUPLICATE KEY UPDATE`. Rows for types that have no active orders in the current run are left at their previous values; the per-row `fetched_at` timestamp reflects when each price was last refreshed and can be surfaced in consumer plugins as a staleness indicator.
-
-= 1.4.0 =
-* Renamed admin menu entry from "ETT Prices" to "EVE Trade Tools".
-* Introduced a master tabbed admin page; existing Price Helper settings are now presented under a "Price Helper" tab.
-* Added tab registration API (`ETT_Admin::register_tab()` / `ett_admin_tabs` action) allowing other ETT plugins to add tabs to the shared admin page without modifying this plugin.
-* Introduced a unified EVE SSO callback URL (`?action=ett_eve_callback`) that handles OAuth returns for all ETT plugins via a state-based dispatcher, replacing the previous plugin-specific callback.
-* Added `ETT_Admin::unified_callback_url()` public method for consistent URL generation across plugins.
-* Updated the developer app setup instructions: callback URL field labelled as "universal — handles all ETT plugins"; required scopes split into separate labelled groups for ETT Price Helper and ETT Reprocess Trading (if installed).
-* Legacy callback action (`ett_sso_callback`) retained for backwards compatibility.
-
-= 1.3.0 =
-* The prices job now fetches CCP's universe-wide adjusted and average price data from ESI immediately after all hub fetches complete, written to a new `ett_adjusted_prices` table.
-* New job phase `adjusted` runs between the hub phase and job completion.
-* Fetches `GET /markets/prices/` and filters to selected type IDs before writing.
-* Full rate-limit and transient-error handling with backoff/retry, consistent with the hub phase.
-* Elapsed time in the completion message now covers the full prices + adjusted run.
-* New database table `ett_adjusted_prices` — created automatically by `ensure_schema()`, no manual migration required.
-* The history fetch concurrency (previously hardcoded at 50 parallel ESI requests per step) is now configurable under Advanced performance settings. New option: History fetch concurrency — range 1–50, default 15. Reducing this value is the recommended fix if you encounter rate limiting during the history phase.
-* Fixed: history cron tick ignored `sleep_until` after a 429 — when the history job was rate-limited during a cron run, the next tick was always scheduled 1 second later instead of waiting out the backoff window.
-* Fixed: Run Prices button briefly re-enabled between prices finishing and history starting — a race condition in `stopJob()` allowed the button to become clickable during the transition; it now stays disabled for the full combined run.
-* Fixed: stale history progress panel left visible on new price run — starting a fresh prices run now clears any previously completed history progress panel.
-* Fixed: history job elapsed timer reset on page refresh — if the page was reloaded while a history job was in progress, the elapsed timer restarted from zero; it now anchors to the job's `started_at` timestamp from the database.
-* Fixed: history job progress blob included prices-only fields — `create_job()` no longer adds `current_hub`, `page`, `orders_seen`, and `matched_orders` to the initial progress JSON for history jobs.
-* Fixed: rate-limit warning retained stale "Backing off and retrying" suffix after recovery — once a rate-limited history batch completed successfully, the warning is now updated to remove the action clause.
-
-= 1.2.0 =
-* Market history fetching — after every price run (manual or scheduled), a history fetch job now runs automatically, pulling 30-day rolling average daily volume per item from the ESI market history endpoint for all selected trade hubs.
-* Parallel ESI requests — history fetching uses `curl_multi` to fire 50 requests simultaneously, keeping total fetch time well under 10 minutes for typical type ID lists.
-* New `ett_market_history` table storing `hub_key`, `type_id`, `avg_daily_volume`, and `fetched_at`.
-* History Fetch Progress UI — new progress section in the Actions card showing phase, hub, items done/total, rows written, elapsed time, heartbeat indicator, progress bar, and debug JSON box.
-* Rate limiting detection — 429 responses during history fetch trigger a 60-second backoff and surface a warning in the UI and debug box, matching the behaviour of the prices job.
-* Non-200 error tracking — non-429 ESI errors during history fetch are counted and logged to the warnings array in progress JSON.
-* Job history table now shows both `prices` and `history` type jobs.
-* Fixed: Run Prices button remains disabled until the history fetch completes, not just until the prices job finishes.
-* Fixed: Cancel button re-enables as "Cancel History" during the history fetch phase and correctly cancels the history job.
-* Fixed: ESI health indicator no longer flips to red on a single transient failed status check — only a previously unknown or already-down state will show Down on a failed check.
-
-= 1.1.0 =
-* Added import of `invTypeMaterials` from Fuzzwork.
-* Renamed external database tables to match Fuzzwork source file names exactly: `ett_invMarketGroups`, `ett_invTypes`, `ett_invMetaGroups`, `ett_invMetaTypes`, `ett_industryActivityProducts`, `ett_invTypeMaterials`.
-* Updated import routines to target renamed tables.
-* Updated schema creation logic to align with new table naming.
-* Updated admin import reporting to reflect new table names.
-* No frontend or pricing logic changes.
-
-= 1.0.1 =
-* Moved inline styles into `admin.css` and removed redundant CSS rules.
-
-= 1.0.0 =
-* Initial public release.
+= 1.0.0 – 1.8.3 = Early development history, condensed: initial release through SDE-based static data import (replacing the earlier Fuzzwork CSV source), Private Trade Hubs (alliance/Upwell structure market data), unified EVE SSO callback across ETT plugins, external cron-driven scheduling (replacing WP-Cron) with pause/resume and run history, parallel ESI history fetching with rate-limit backoff, an atomic staging-table swap for price writes (preventing partial/interrupted runs from corrupting live data), and a long tail of bug fixes around buy-order range filtering, timezone-correct heartbeats, portionSize tracking for reprocessing calculations, and PHPCS compliance.
 
 == Upgrade Notice ==
 
