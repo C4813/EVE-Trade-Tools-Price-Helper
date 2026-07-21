@@ -263,6 +263,8 @@ class ETT_Runner {
                 do {
                     if ($job_type === 'history') {
                         $progress = self::step_history($pdo, $progress);
+                    } elseif ($job_type === 'contracts') {
+                        $progress = self::step_contracts($pdo, $progress);
                     } else {
                         $progress = self::step_prices($pdo, $progress, $job_id);
                     }
@@ -475,6 +477,8 @@ class ETT_Runner {
 
                 if ($job_type === 'history') {
                     $progress = self::step_history($pdo, $progress);
+                } elseif ($job_type === 'contracts') {
+                    $progress = self::step_contracts($pdo, $progress);
                 } else {
                     $progress = self::step_prices($pdo, $progress, $job_id);
                 }
@@ -523,6 +527,22 @@ class ETT_Runner {
     private static function step_history(\PDO $pdo, array $progress) : array {
         static $m = null;
         if ($m === null) { $m = new \ReflectionMethod(ETT_Jobs::class, 'step_history'); $m->setAccessible(true); }
+        return $m->invoke(null, $pdo, $progress);
+    }
+
+    /**
+     * Was missing entirely — every scheduled/cron-driven 'contracts' job
+     * fell through to step_prices() below instead, since the dispatch
+     * only ever checked for 'history' explicitly. This silently ran the
+     * prices fetch under a 'contracts' label for every single scheduled
+     * Contract Fetch run, meaning contract/BPC data was never actually
+     * refreshed via cron at all — only ever by a manual, browser-driven
+     * run (which uses ajax_step() in class-ett-jobs.php, a completely
+     * separate dispatch path that already had this correct).
+     */
+    private static function step_contracts(\PDO $pdo, array $progress) : array {
+        static $m = null;
+        if ($m === null) { $m = new \ReflectionMethod(ETT_Jobs::class, 'step_contracts'); $m->setAccessible(true); }
         return $m->invoke(null, $pdo, $progress);
     }
 
