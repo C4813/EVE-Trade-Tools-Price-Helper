@@ -205,11 +205,29 @@ class ETT_ExternalDB {
 			blueprint_type_id BIGINT UNSIGNED NOT NULL,
 			price DECIMAL(20,2) NOT NULL,
 			runs INT UNSIGNED NOT NULL,
+			quantity INT UNSIGNED NOT NULL DEFAULT 1,
 			material_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
 			time_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
 			checked_at DATETIME NOT NULL,
 			KEY blueprint_type_id (blueprint_type_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// Migration: add quantity to existing installations that predate
+		// same-type bulk listing support (e.g. 5x identical Capital Armor
+		// Plates BPCs bundled in one contract) — price and runs already
+		// represent the WHOLE bulk listing's totals (full contract price,
+		// summed runs across every copy), quantity is purely how many
+		// individual copies contributed to that sum, for display/context
+		// only, never part of the per-run price ÷ runs math itself.
+		$col = $pdo->prepare("SELECT COUNT(*) AS c
+			FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE()
+				AND TABLE_NAME = 'ett_contract_bpc_active'
+				AND COLUMN_NAME = 'quantity'");
+		$col->execute();
+		if ((int)($col->fetch()['c'] ?? 0) === 0) {
+			$pdo->exec("ALTER TABLE ett_contract_bpc_active ADD COLUMN quantity INT UNSIGNED NOT NULL DEFAULT 1");
+		}
 
 		// Migration: add material_efficiency/time_efficiency to existing
 		// installations that predate these columns.
@@ -258,8 +276,10 @@ class ETT_ExternalDB {
 			per_run_price DECIMAL(20,2) NOT NULL,
 			winning_price DECIMAL(20,2) NOT NULL,
 			winning_runs INT UNSIGNED NOT NULL,
+			winning_quantity INT UNSIGNED NOT NULL DEFAULT 1,
 			material_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
 			time_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			contract_id BIGINT UNSIGNED NULL,
 			sample_count INT UNSIGNED NOT NULL,
 			computed_at DATETIME NOT NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
@@ -269,8 +289,10 @@ class ETT_ExternalDB {
 		foreach ([
 			'winning_price' => 'DECIMAL(20,2) NOT NULL DEFAULT 0',
 			'winning_runs' => 'INT UNSIGNED NOT NULL DEFAULT 1',
+			'winning_quantity' => 'INT UNSIGNED NOT NULL DEFAULT 1',
 			'material_efficiency' => 'TINYINT UNSIGNED NOT NULL DEFAULT 0',
 			'time_efficiency' => 'TINYINT UNSIGNED NOT NULL DEFAULT 0',
+			'contract_id' => 'BIGINT UNSIGNED NULL',
 		] as $col_name => $col_def) {
 			$col = $pdo->prepare("SELECT COUNT(*) AS c
 				FROM INFORMATION_SCHEMA.COLUMNS
@@ -281,6 +303,82 @@ class ETT_ExternalDB {
 			if ((int)($col->fetch()['c'] ?? 0) === 0) {
 				$pdo->exec("ALTER TABLE ett_contract_bpc_prices ADD COLUMN {$col_name} {$col_def}");
 			}
+		}
+
+		// A contract mixing DIFFERENT blueprint types (or blueprints mixed
+		// with non-blueprint items) can't be fairly priced per-item — no
+		// way to know how the seller split the lump sum across genuinely
+		// different things. But it might still be a genuine "complete
+		// build pack" (a hull blueprint plus every component blueprint
+		// that hull's build needs, all in one contract) — recognizing
+		// that requires comparing this contract's FULL contents against
+		// what a specific hull's build actually needs, which only
+		// ett-build-costs knows how to determine. So rather than deciding
+		// "pack or not" here, this just records everything found — every
+		// distinct blueprint (grouped by type/ME%/TE%, since a contract
+		// could bundle multiple identical copies of one type alongside
+		// other types) plus the contract's own total price — for
+		// ett-build-costs to later check against real hull requirements.
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_contract_packs (
+			contract_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+			total_price DECIMAL(20,2) NOT NULL,
+			has_non_blueprint_items TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			checked_at DATETIME NOT NULL
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// One row per distinct (blueprint_type_id, ME%, TE%) group found
+		// within a pack candidate — quantity/runs_per_copy assume every
+		// copy within the SAME group is identical, same homogeneity
+		// principle already used for same-type bulk listings.
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_contract_pack_items (
+			contract_id BIGINT UNSIGNED NOT NULL,
+			blueprint_type_id BIGINT UNSIGNED NOT NULL,
+			material_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			time_efficiency TINYINT UNSIGNED NOT NULL DEFAULT 0,
+			quantity INT UNSIGNED NOT NULL,
+			runs_per_copy INT UNSIGNED NOT NULL,
+			PRIMARY KEY (contract_id, blueprint_type_id, material_efficiency, time_efficiency),
+			KEY blueprint_type_id (blueprint_type_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// Every genuinely distinct (blueprint, ME%, TE%) combination that
+		// survives outlier rejection, not just the single overall cheapest
+		// per-run winner (that's still what ett_contract_bpc_prices
+		// stores, unchanged — this is purely additive, existing behavior
+		// is untouched). Needed because "cheapest to acquire" and
+		// "cheapest overall once you account for how much extra material
+		// waste a lower ME level causes" are different questions — a more
+		// expensive, better-researched candidate can still win once real
+		// material cost is factored in, but that comparison needs every
+		// real option on the table, not just whichever had the lowest
+		// sticker price.
+		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_contract_bpc_candidates (
+			blueprint_type_id BIGINT UNSIGNED NOT NULL,
+			material_efficiency TINYINT UNSIGNED NOT NULL,
+			time_efficiency TINYINT UNSIGNED NOT NULL,
+			per_run_price DECIMAL(20,2) NOT NULL,
+			winning_price DECIMAL(20,2) NOT NULL,
+			winning_runs INT UNSIGNED NOT NULL,
+			winning_quantity INT UNSIGNED NOT NULL DEFAULT 1,
+			contract_id BIGINT UNSIGNED NULL,
+			computed_at DATETIME NOT NULL,
+			PRIMARY KEY (blueprint_type_id, material_efficiency, time_efficiency)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+		// Migration: add contract_id to existing installations that predate
+		// it — needed so a Discord "Open Contract In-Game" button has a
+		// real contract to point at. Nullable: a stray existing row from
+		// before this column existed simply won't have one until the next
+		// aggregation pass recomputes it (which happens on every normal
+		// Contract Fetch run, no re-pull needed).
+		$col = $pdo->prepare("SELECT COUNT(*) AS c
+			FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE()
+				AND TABLE_NAME = 'ett_contract_bpc_candidates'
+				AND COLUMN_NAME = 'contract_id'");
+		$col->execute();
+		if ((int)($col->fetch()['c'] ?? 0) === 0) {
+			$pdo->exec("ALTER TABLE ett_contract_bpc_candidates ADD COLUMN contract_id BIGINT UNSIGNED NULL");
 		}
 
 		$pdo->exec("CREATE TABLE IF NOT EXISTS ett_selected_typeids (
