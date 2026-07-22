@@ -42,6 +42,8 @@
     let genBtnFlashTimer = null;
 	let runGen = 0; // increments whenever we stop/cancel/start to invalidate in-flight AJAX responses
 	let lastHeartbeatMs = null; // local receipt time of most recent prices heartbeat
+	let lastHistoryHeartbeatMs = null; // local receipt time of most recent history heartbeat
+	let lastContractsHeartbeatMs = null; // local receipt time of most recent contracts heartbeat
     let statusInFlight = false;
     let stepInFlight = false;
 
@@ -55,6 +57,7 @@
 			if (!historyStartedAtMs) return;
 			const secs = Math.floor((Date.now() - historyStartedAtMs) / 1000);
 			$('#ett-history-kpi-elapsed').text(formatHMS(secs));
+			refreshHistoryHeartbeatDisplay();
 		};
 		tick();
 		historyElapsedTimer = setInterval(tick, 1000);
@@ -64,6 +67,7 @@
 		if (historyElapsedTimer) clearInterval(historyElapsedTimer);
 		historyElapsedTimer = null;
 		historyStartedAtMs  = null;
+		lastHistoryHeartbeatMs = null;
 	}
 
 	function startContractsElapsedTicker(){
@@ -72,6 +76,7 @@
 			if (!contractsStartedAtMs) return;
 			const secs = Math.floor((Date.now() - contractsStartedAtMs) / 1000);
 			$('#ett-contracts-kpi-elapsed').text(formatHMS(secs));
+			refreshContractsHeartbeatDisplay();
 		};
 		tick();
 		contractsElapsedTimer = setInterval(tick, 1000);
@@ -81,6 +86,7 @@
 		if (contractsElapsedTimer) clearInterval(contractsElapsedTimer);
 		contractsElapsedTimer = null;
 		contractsStartedAtMs  = null;
+		lastContractsHeartbeatMs = null;
 	}
 
 	function setHistoryHeartbeat(tsMysql){
@@ -89,19 +95,29 @@
 		const txt = el.find('.ett-hb-text');
 
 		if (!tsMysql){
+			lastHistoryHeartbeatMs = null;
 			dot.removeClass('ok bad warn');
 			txt.text('No heartbeat');
 			return;
 		}
 
-		const hb    = new Date(tsMysql.replace(' ', 'T'));
-		const delta = nowMs() - hb.getTime();
+		// Record local receipt time to avoid server/browser timezone
+		// mismatch — same reasoning and pattern as the prices heartbeat
+		// (setHeartbeat() above), which already had this right. Parsing
+		// tsMysql directly here (as this used to) breaks the instant the
+		// site's configured timezone differs from the browser's own,
+		// since MySQL DATETIME strings carry no timezone of their own.
+		lastHistoryHeartbeatMs = Date.now();
+		dot.removeClass('bad warn').addClass('ok');
+		txt.text('Heartbeat: OK');
+	}
 
-		if (isNaN(delta)){
-			dot.removeClass('ok bad warn');
-			txt.text('Heartbeat unknown');
-			return;
-		}
+	function refreshHistoryHeartbeatDisplay(){
+		if (lastHistoryHeartbeatMs === null) return;
+		const el  = $('#ett-history-heartbeat');
+		const dot = el.find('.ett-dot');
+		const txt = el.find('.ett-hb-text');
+		const delta = Date.now() - lastHistoryHeartbeatMs;
 
 		if (delta <= 15000){
 			dot.removeClass('bad warn').addClass('ok');
@@ -125,19 +141,25 @@
 		const txt = el.find('.ett-hb-text');
 
 		if (!tsMysql){
+			lastContractsHeartbeatMs = null;
 			dot.removeClass('ok bad warn');
 			txt.text('No heartbeat');
 			return;
 		}
 
-		const hb    = new Date(tsMysql.replace(' ', 'T'));
-		const delta = nowMs() - hb.getTime();
+		// Local receipt time — see setHistoryHeartbeat()'s own comment
+		// above for why (server/browser timezone mismatch).
+		lastContractsHeartbeatMs = Date.now();
+		dot.removeClass('bad warn').addClass('ok');
+		txt.text('Heartbeat: OK');
+	}
 
-		if (isNaN(delta)){
-			dot.removeClass('ok bad warn');
-			txt.text('Heartbeat unknown');
-			return;
-		}
+	function refreshContractsHeartbeatDisplay(){
+		if (lastContractsHeartbeatMs === null) return;
+		const el  = $('#ett-contracts-heartbeat');
+		const dot = el.find('.ett-dot');
+		const txt = el.find('.ett-hb-text');
+		const delta = Date.now() - lastContractsHeartbeatMs;
 
 		if (delta <= 15000){
 			dot.removeClass('bad warn').addClass('ok');
