@@ -583,7 +583,11 @@ class ETT_Runner {
     }
 
     private static function heartbeat(\PDO $pdo, string $job_id, array $progress) : void {
-        $now = current_time('mysql');
+        // True UTC (gmt=true) — matches the fix in ETT_Jobs::heartbeat()
+        // (the manual/browser-driven path's own version of this same
+        // function). This is a separate, independent implementation, not
+        // a shared call — it had the identical bug on its own.
+        $now = current_time('mysql', true);
         $pj  = json_encode($progress, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
         self::with_deadlock_retry(function() use ($pdo, $job_id, $pj, $now) {
             $s = $pdo->prepare('UPDATE ett_jobs SET progress_json=:pj, heartbeat_at=:hb WHERE job_id=:id');
