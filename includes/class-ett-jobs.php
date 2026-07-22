@@ -828,7 +828,13 @@ class ETT_Jobs {
 	}
 
     private static function heartbeat(PDO $pdo, string $job_id, array $progress) : string {
-        $now = current_time('mysql');
+        // True UTC (gmt=true), not site-local — this value is never shown
+        // to a human directly (only ever fed into the JS staleness/delta
+        // calculation), and the browser's own Date parsing has no way to
+        // know the site's configured timezone. Site-local time here would
+        // silently corrupt every "how stale is this heartbeat" comparison
+        // whenever the site's timezone differs from the browser's own.
+        $now = current_time('mysql', true);
         $pj = json_encode($progress, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
         self::with_deadlock_retry(function() use ($pdo, $job_id, $pj, $now) {
             $stmt = $pdo->prepare('UPDATE ett_jobs SET progress_json=:pj, heartbeat_at=:hb WHERE job_id=:id');
