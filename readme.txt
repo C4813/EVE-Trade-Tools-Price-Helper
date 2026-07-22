@@ -4,7 +4,7 @@ Tags: eve online, esi, prices, market, admin
 Requires at least: 6.0
 Tested up to: 6.9
 Requires PHP: 8.0
-Stable tag: 1.22.0
+Stable tag: 1.23.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -64,6 +64,22 @@ No. The importer uses custom streaming line-by-line parsers that handle the SDE 
 marketGroups.yaml, metaGroups.yaml, types.yaml, typeMaterials.yaml, and blueprints.yaml. The importer finds them by basename regardless of their path inside the ZIP (e.g. sde/fsd/types.yaml works fine).
 
 == Changelog ==
+
+= 1.23.0 =
+* Fixed: History/Contracts heartbeat could show "stale" even while genuine progress
+  was actively happening. Root cause: heartbeat_at was generated using site-local
+  time (current_time('mysql') without the GMT flag), but the browser's own Date
+  parsing has no way to know the site's configured timezone — it silently
+  interpreted the string as if it were the browser's own local time, corrupting the
+  staleness comparison whenever the two timezones differ. Fixed on both sides: the
+  server now uses true UTC for heartbeat_at (this value is never shown to a human
+  directly, only ever used for this comparison), and — following the same pattern
+  the Prices heartbeat display already used correctly — the History/Contracts
+  heartbeat displays now track local browser receipt time instead of parsing the
+  server's timestamp at all, sidestepping any timezone mismatch entirely rather
+  than just correcting for one specific case. Verified directly: the corrected
+  logic transitions OK → waiting → stale at the right thresholds, and correctly
+  resets on a fresh heartbeat regardless of the server's own clock.
 
 = 1.22.0 =
 * Critical fix: every scheduled, cron-driven Contract Fetch run has been silently
